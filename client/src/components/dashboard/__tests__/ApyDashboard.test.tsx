@@ -67,7 +67,10 @@ describe('ApyDashboard states', () => {
     render(<ApyDashboard />);
 
     expect(await screen.findByTestId('apy-empty-state')).toBeInTheDocument();
-    expect(screen.getByText(/No APY data available yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/No APY data yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/New rates will appear here as protocols report yields/i),
+    ).toBeInTheDocument();
   });
 
   it('shows retryable failure state and recovers on retry', async () => {

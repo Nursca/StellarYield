@@ -83,8 +83,14 @@ export default function ProtocolDistributionChart({
       </div>
 
       {sortedProtocols.length === 0 && (
-        <div className="p-12 text-center text-gray-500">
-          No protocol data available
+        <div
+          className="p-12 text-center text-gray-500"
+          data-testid="protocol-distribution-empty"
+        >
+          <p className="font-medium">No protocol data yet</p>
+          <p className="text-xs mt-1">
+            Distribution figures will appear once routing samples are available.
+          </p>
         </div>
       )}
     </div>

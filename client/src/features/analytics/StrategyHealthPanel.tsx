@@ -147,13 +147,13 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
 
   if (error) {
     return (
-      <div className="glass-panel p-8">
+      <div className="glass-panel p-8" data-testid="strategy-health-error">
         <div className="text-center py-12">
           <AlertTriangle className="mx-auto mb-4 text-red-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">Health Data Unavailable</h3>
+          <h3 className="text-lg font-semibold mb-2">Health data is currently unavailable</h3>
           <p className="text-gray-400 mb-4">{error}</p>
           <button onClick={fetchHealthScores} className="btn-primary">
-            Retry
+            Try again
           </button>
         </div>
       </div>
@@ -162,11 +162,13 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
 
   if (healthScores.length === 0) {
     return (
-      <div className="glass-panel p-8">
+      <div className="glass-panel p-8" data-testid="strategy-health-empty">
         <div className="text-center py-12">
           <Activity className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">No Health Data</h3>
-          <p className="text-gray-400">No strategies found or health data unavailable.</p>
+          <h3 className="text-lg font-semibold mb-2">No strategy health data yet</h3>
+          <p className="text-gray-400">
+            Health scores will appear here once strategies report a snapshot.
+          </p>
         </div>
       </div>
     );

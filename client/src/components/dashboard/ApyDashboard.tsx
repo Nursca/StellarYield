@@ -585,11 +585,13 @@ export default function ApyDashboard() {
       {!loading && apyData.length === 0 && (
         <div className="glass-panel p-16 text-center" data-testid="apy-empty-state">
           <AlertTriangle size={32} className="text-gray-500 mx-auto mb-4" />
-          <p className="text-gray-300 font-medium">No APY data available yet</p>
-          <p className="text-gray-500 text-sm mt-1">Try refreshing to load the latest rates.</p>
+          <p className="text-gray-300 font-medium">No APY data yet</p>
+          <p className="text-gray-500 text-sm mt-1">
+            New rates will appear here as protocols report yields. Refresh to check again.
+          </p>
           <button onClick={handleRefresh} className="btn-secondary inline-flex items-center gap-2 mt-6">
             <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-            Retry
+            Refresh
           </button>
         </div>
       )}
