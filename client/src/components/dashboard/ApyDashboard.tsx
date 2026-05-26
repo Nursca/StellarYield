@@ -34,6 +34,15 @@ interface ApyEntry {
     environment: "low" | "medium" | "high";
     netApy: number;
   }>;
+  feeAttribution?: {
+    managementFeeApy: number;
+    protocolFeeApy: number;
+    slippageApy: number;
+    networkFeeApy: number;
+    rewardOffsetApy: number;
+    unknownFeeApy: number;
+    totalFeeDragApy: number;
+  };
   capitalEfficiency?: {
     score: number;
     grade: "A" | "B" | "C" | "D";
@@ -313,6 +322,16 @@ export default function ApyDashboard() {
     : 0;
   const totalTvl = apyData.reduce((s, d) => s + d.tvl, 0);
   const protocolCount = new Set(apyData.map((d) => d.protocol)).size;
+  const feeAttributionRows = apyData.map((entry) => ({
+    vault: entry.protocol,
+    totalFeeDragApy: entry.feeAttribution?.totalFeeDragApy ?? entry.feeDragApy ?? 0,
+    managementFeeApy: entry.feeAttribution?.managementFeeApy ?? 0,
+    protocolFeeApy: entry.feeAttribution?.protocolFeeApy ?? 0,
+    slippageApy: entry.feeAttribution?.slippageApy ?? 0,
+    networkFeeApy: entry.feeAttribution?.networkFeeApy ?? 0,
+    rewardOffsetApy: entry.feeAttribution?.rewardOffsetApy ?? 0,
+    unknownFeeApy: entry.feeAttribution?.unknownFeeApy ?? 0,
+  }));
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -457,6 +476,49 @@ export default function ApyDashboard() {
             <p className="text-2xl font-bold">{protocolCount}</p>
           </div>
         </div>
+      )}
+
+      {!loading && feeAttributionRows.length > 0 && (
+        <section className="glass-panel p-5">
+          <div className="mb-3">
+            <h3 className="text-lg font-semibold">Cross-Vault Fee Attribution</h3>
+            <p className="text-xs text-gray-400">
+              Comparative fee drag by management, protocol, slippage, network, reward offsets, and unknown components.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-400">
+                  <th className="py-2 text-left">Vault</th>
+                  <th className="py-2 text-right">Total Drag</th>
+                  <th className="py-2 text-right">Mgmt</th>
+                  <th className="py-2 text-right">Protocol</th>
+                  <th className="py-2 text-right">Slippage</th>
+                  <th className="py-2 text-right">Network</th>
+                  <th className="py-2 text-right">Reward Offset</th>
+                  <th className="py-2 text-right">Unknown</th>
+                </tr>
+              </thead>
+              <tbody>
+                {feeAttributionRows.map((row) => (
+                  <tr key={row.vault} className="border-t border-white/10">
+                    <td className="py-2">{row.vault}</td>
+                    <td className="py-2 text-right text-red-300">{row.totalFeeDragApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right">{row.managementFeeApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right">{row.protocolFeeApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right">{row.slippageApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right">{row.networkFeeApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right text-green-300">-{row.rewardOffsetApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right">
+                      {row.unknownFeeApy > 0 ? `${row.unknownFeeApy.toFixed(2)}%` : "Unknown / None"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
 
       {/* Toolbar: Search + Filters + View Toggle */}
