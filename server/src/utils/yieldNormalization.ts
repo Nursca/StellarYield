@@ -15,7 +15,7 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
 
   const baseApy = roundTo(rawYield.apyBps / 100, 2);
   let rewardApy = 0;
-  const rewards: { symbol: string; apy: number }[] = [];
+  const rewards: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" }[] = [];
 
   if (rawYield.rewards && rawYield.tvlUsd > 0) {
     for (const reward of rawYield.rewards) {
@@ -30,11 +30,16 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
       
       // If confidence is low, we still include it but it's marked
       rewardApy += roundedApy;
-      rewards.push({
+      const rewardEntry: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" } = {
         symbol: reward.tokenSymbol,
         apy: roundedApy,
-        confidence: reward.confidence,
-      });
+      };
+      
+      if (reward.confidence) {
+        rewardEntry.confidence = reward.confidence;
+      }
+      
+      rewards.push(rewardEntry);
     }
   }
 
