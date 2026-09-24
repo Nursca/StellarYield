@@ -40,7 +40,12 @@ export const KNOWN_CONTRACT_ERROR_CODES = new Set([
     2001, 2002, 2007,
     // Intent Swap
     3001, 3002,
+    // Zap
+    4001,
 ]);
+
+/** Zap contract: the ledger closed after the quote deadline. */
+export const ZAP_QUOTE_EXPIRED_ERROR_CODE = 4001;
 
 /** Maps known contract error codes to user-facing messages. */
 const CONTRACT_ERROR_MAP: Record<
@@ -145,6 +150,13 @@ const CONTRACT_ERROR_MAP: Record<
         title: "Order Expired",
         message: "Your swap intent expired before it could be matched.",
         suggestion: "Submit a new swap order with an updated expiry.",
+    },
+
+    // ── Zap ─────────────────────────────────────────────────────────────
+    4001: {
+        title: "Quote Expired",
+        message: "The swap quote expired before your transaction reached the network, so nothing was swapped or deposited.",
+        suggestion: "Refresh the quote and submit again.",
     },
 };
 

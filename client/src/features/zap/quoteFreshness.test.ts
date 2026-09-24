@@ -7,6 +7,7 @@ import {
   isZapQuoteExpired,
   quoteAgeSeconds,
   recalculateMinOut,
+  zapQuoteDeadlineSeconds,
 } from "./quoteFreshness";
 import { minAmountAfterSlippage } from "./slippage";
 
@@ -107,6 +108,36 @@ describe("isZapQuoteExpired", () => {
     const quote = { quotedAt: new Date(quotedAt).toISOString() };
     expect(isZapQuoteExpired(quote, quotedAt + ZAP_QUOTE_TTL_MS)).toBe(false);
     expect(isZapQuoteExpired(quote, quotedAt + ZAP_QUOTE_TTL_MS + 1)).toBe(true);
+  });
+});
+
+describe("zapQuoteDeadlineSeconds", () => {
+  const NOW = Date.parse("2026-09-24T12:00:00.000Z");
+
+  it("uses expiresAt, floored to whole seconds", () => {
+    expect(
+      zapQuoteDeadlineSeconds({ quotedAt: "2026-09-24T12:00:00.000Z", expiresAt: "2026-09-24T12:01:00.999Z" }, NOW),
+    ).toBe(BigInt(Math.floor(Date.parse("2026-09-24T12:01:00.000Z") / 1000)));
+  });
+
+  it("falls back to quotedAt + TTL when expiresAt is missing or unparseable", () => {
+    const expected = BigInt((Date.parse("2026-09-24T11:59:30.000Z") + ZAP_QUOTE_TTL_MS) / 1000);
+    expect(zapQuoteDeadlineSeconds({ quotedAt: "2026-09-24T11:59:30.000Z" }, NOW)).toBe(expected);
+    expect(
+      zapQuoteDeadlineSeconds({ quotedAt: "2026-09-24T11:59:30.000Z", expiresAt: "garbage" }, NOW),
+    ).toBe(expected);
+  });
+
+  it("falls back to now + TTL without a usable quote", () => {
+    const expected = BigInt((NOW + ZAP_QUOTE_TTL_MS) / 1000);
+    expect(zapQuoteDeadlineSeconds(null, NOW)).toBe(expected);
+    expect(zapQuoteDeadlineSeconds({ quotedAt: "garbage" }, NOW)).toBe(expected);
+  });
+
+  it("never exceeds the preview's own expiry instant", () => {
+    const quote = { quotedAt: "2026-09-24T12:00:00.000Z", expiresAt: "2026-09-24T12:01:00.400Z" };
+    const deadlineMs = Number(zapQuoteDeadlineSeconds(quote, NOW)) * 1000;
+    expect(evaluateZapQuoteInvalidation(quote, deadlineMs).status).toBe("valid");
   });
 });
 

@@ -56,6 +56,30 @@ export function evaluateZapQuoteInvalidation(
   return { status: "valid", ageMs, remainingMs: expiresMs - nowMs };
 }
 
+/**
+ * On-chain deadline (Unix seconds) for `zap_deposit_with_deadline`, derived
+ * with the same rules as {@link evaluateZapQuoteInvalidation}: the quote's
+ * `expiresAt`, else `quotedAt + TTL`, else `nowMs + TTL` when there is no
+ * usable quote. Floored to whole seconds, so the contract never accepts a
+ * transaction later than the preview would.
+ */
+export function zapQuoteDeadlineSeconds(
+  quote: ZapQuoteFreshnessInput | null,
+  nowMs: number = Date.now(),
+): bigint {
+  let deadlineMs = Number.NaN;
+  if (quote) {
+    deadlineMs = quote.expiresAt ? new Date(quote.expiresAt).getTime() : Number.NaN;
+    if (!Number.isFinite(deadlineMs)) {
+      deadlineMs = new Date(quote.quotedAt).getTime() + ZAP_QUOTE_TTL_MS;
+    }
+  }
+  if (!Number.isFinite(deadlineMs)) {
+    deadlineMs = nowMs + ZAP_QUOTE_TTL_MS;
+  }
+  return BigInt(Math.floor(deadlineMs / 1000));
+}
+
 /** Returns true when a zap quote should be treated as stale. */
 export function isZapQuoteExpired(
   quote: ZapQuoteFreshnessInput,

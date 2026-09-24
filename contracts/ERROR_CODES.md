@@ -173,6 +173,7 @@ Source: `contracts/zap/src/lib.rs`
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
 | 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
 | 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
 ---
 

@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import ZapDepositPanel from "./ZapDepositPanel";
+import { zapDeposit } from "../../services/soroban";
 
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
@@ -277,6 +278,62 @@ describe("ZapDepositPanel", () => {
       expect(
         screen.queryByText("Asset configuration has drifted"),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("on-chain quote deadline", () => {
+    const EXPIRES_AT = "2099-01-01T00:01:00.500Z";
+
+    function mockFreshQuoteThenVerifyOk() {
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes("/api/zap/verify")) {
+          return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () =>
+            createMockQuote({ quotedAt: new Date().toISOString(), expiresAt: EXPIRES_AT }),
+        });
+      });
+    }
+
+    async function submitZap() {
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+      await userEvent.type(screen.getByPlaceholderText("0.00"), "100");
+      await waitFor(() => expect(screen.getByText("Simulated")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+    }
+
+    it("binds the transaction to the quote expiresAt (floored seconds)", async () => {
+      mockFreshQuoteThenVerifyOk();
+      vi.mocked(zapDeposit).mockResolvedValueOnce({ success: true, hash: "0xhash" });
+
+      await submitZap();
+
+      await waitFor(() => expect(zapDeposit).toHaveBeenCalledTimes(1));
+      const params = vi.mocked(zapDeposit).mock.calls[0][1];
+      expect(params.deadlineUnixSeconds).toBe(
+        BigInt(Math.floor(Date.parse(EXPIRES_AT) / 1000)),
+      );
+      expect(params.expectedAmountOut).toBe(9_500_000n);
+      expect(params.allowPartial).toBe(true);
+    });
+
+    it("invalidates the preview when the contract rejects with QuoteExpired (4001)", async () => {
+      mockFreshQuoteThenVerifyOk();
+      vi.mocked(zapDeposit).mockResolvedValueOnce({
+        success: false,
+        error: "Contract Execution Error [4001 Unknown]: ...",
+        errorCode: 4001,
+      });
+
+      await submitZap();
+
+      await waitFor(() => {
+        expect(screen.getByText("Quote expired. Refresh and try again.")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Min. after", { exact: false })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Contract Execution Error/)).not.toBeInTheDocument();
     });
   });
 

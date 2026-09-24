@@ -44,6 +44,19 @@ export interface TxResult {
   success: boolean;
   hash?: string;
   error?: string;
+  /**
+   * Numeric contract error code when the failure was a typed contract error
+   * (e.g. 4001 `QuoteExpired`). Lets callers branch without parsing `error`.
+   */
+  errorCode?: number;
+}
+
+/** Placeholder code the SDK uses when no contract error code was recognized. */
+const SDK_GENERIC_ERROR_CODE = 999;
+
+function contractErrorCode(parsed: unknown): number | undefined {
+  const code = (parsed as { errorCode?: unknown } | null)?.errorCode;
+  return typeof code === "number" && code !== SDK_GENERIC_ERROR_CODE ? code : undefined;
 }
 
 /** Lifecycle phases for Soroban flows (timeline + callbacks). */
@@ -353,6 +366,7 @@ export async function executeZapContractCall(
     return {
       success: false,
       error: parsed.message,
+      errorCode: contractErrorCode(parsed),
     };
   }
 }
@@ -364,6 +378,15 @@ export interface ZapDepositParams {
   amountIn: bigint;
   minAmountOut: bigint;
   minSharesOut: bigint;
+  /** Quoted swap output; `0n` disables partial-fill detection on-chain. */
+  expectedAmountOut: bigint;
+  /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
+  allowPartial: boolean;
+  /**
+   * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
+   * transaction with `QuoteExpired` (4001) if the ledger closes after it.
+   */
+  deadlineUnixSeconds: bigint;
 }
 
 export async function zapDeposit(
@@ -375,7 +398,7 @@ export async function zapDeposit(
 ): Promise<TxResult> {
   return executeZapContractCall(
     userAddress,
-    "zap_deposit",
+    "zap_deposit_with_deadline",
     [
       new StellarSdk.Address(userAddress).toScVal(),
       new StellarSdk.Address(params.inputTokenContract).toScVal(),
@@ -384,6 +407,9 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.amountIn, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
+      StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
+      StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+      StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
     ],
     onPhase,
     useFeeBump,

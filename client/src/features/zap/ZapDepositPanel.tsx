@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, ExternalLink, LifeBuoy } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
-import { decodeTransactionError } from "../../utils/errorDecoder";
+import { decodeTransactionError, ZAP_QUOTE_EXPIRED_ERROR_CODE } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
@@ -20,6 +20,7 @@ import {
   quoteAgeSeconds,
   recalculateMinOut,
   ZAP_QUOTE_EXPIRED_MESSAGE,
+  zapQuoteDeadlineSeconds,
 } from "./quoteFreshness";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
@@ -394,11 +395,22 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           amountIn,
           minAmountOut: minOut,
           minSharesOut: minOut,
+          expectedAmountOut: expectedOut ?? 0n,
+          // `minAmountOut` already enforces the user's slippage tolerance.
+          allowPartial: true,
+          deadlineUnixSeconds: zapQuoteDeadlineSeconds(quoteData),
         },
         emitPhase,
         false,
         settings,
       );
+      if (!result.success && result.errorCode === ZAP_QUOTE_EXPIRED_ERROR_CODE) {
+        // The contract refused the quote as expired before moving any funds.
+        invalidatePreview();
+        setStatus("error");
+        setError(ZAP_QUOTE_EXPIRED_MESSAGE);
+        return;
+      }
       if (!result.success) {
         throw new Error(result.error || "Transaction failed");
       }
@@ -417,6 +429,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     vaultToken.contractId,
     amount,
     minOut,
+    expectedOut,
     emitPhase,
     settings,
     quoteData,
