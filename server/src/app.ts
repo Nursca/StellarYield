@@ -51,6 +51,7 @@ import offrampRouter from "./routes/offramp";
 import contactsRouter from "./routes/contacts";
 import rebalancesRouter from "./routes/rebalances";
 import sharePriceHistoryRouter from "./routes/sharePriceHistory";
+import vaultSharePriceReconcileRouter from "./routes/vaultSharePriceReconcile";
 import withdrawalPreviewRouter from "./routes/withdrawalPreview";
 import reliabilityRouter from "./routes/reliability";
 import relayerStatusRouter from "./routes/relayerStatus";
@@ -174,6 +175,7 @@ export function createApp() {
   app.use("/api/contacts", contactsRouter);
   app.use("/api/rebalances", rebalancesRouter);
   app.use("/api/vaults", sharePriceHistoryRouter);
+  app.use("/api/vaults", vaultSharePriceReconcileRouter);
   app.use("/api/vaults", withdrawalPreviewRouter);
   app.use("/api/reliability", reliabilityRouter);
   app.use("/api/relayer", relayerStatusRouter);
