@@ -24,13 +24,16 @@ import {
 import {
   VAULT_SHARE_PRICE_EVENT_TYPES,
   type CachedSharePrice,
+  type SharePriceReconStatus,
   type VaultSharePriceEvent,
   type VaultSharePriceEventType,
 } from "../../../shared/types/vaultSharePrice";
 
+const RECON_STATUSES: readonly SharePriceReconStatus[] = ["success", "partial", "failed"];
+
 /** True when the parsed body field passes its basic shape check. */
 function isValidIntegerString(value: unknown): value is string {
-  return typeof value === "string" && /^-?\d+$/.test(value);
+  return typeof value === "string" && /^\d+$/.test(value);
 }
 
 /**
@@ -63,22 +66,22 @@ function validateEvent(raw: unknown): string | null {
     return `Each event requires a valid \`eventType\` (one of ${[...VAULT_SHARE_PRICE_EVENT_TYPES].join(", ")}).`;
   }
   if (!isValidIntegerString(e.amount)) {
-    return "Each event requires an integer-string `amount`.";
+    return "Each event requires a non-negative integer-string `amount`.";
   }
-  if (!Number.isInteger(e.ledger) || e.ledger < 0) {
+  if (!Number.isInteger(e.ledger) || (e.ledger as number) < 0) {
     return "Each event requires a non-negative integer `ledger`.";
   }
   if (typeof e.txHash !== "string" || e.txHash.trim() === "") {
     return "Each event requires a non-empty string `txHash`.";
   }
-  if (!Number.isInteger(e.eventIndex) || e.eventIndex < 0) {
+  if (!Number.isInteger(e.eventIndex) || (e.eventIndex as number) < 0) {
     return "Each event requires a non-negative integer `eventIndex`.";
   }
   if (e.shares !== undefined && !isValidIntegerString(e.shares)) {
-    return "If present, `shares` must be an integer-string.";
+    return "If present, `shares` must be a non-negative integer-string.";
   }
   if (e.keeperFee !== undefined && !isValidIntegerString(e.keeperFee)) {
-    return "If present, `keeperFee` must be an integer-string.";
+    return "If present, `keeperFee` must be a non-negative integer-string.";
   }
   return null;
 }
@@ -91,17 +94,24 @@ function validateCachedSnapshot(raw: unknown): CachedSharePrice | null {
   const isFiniteNum = (v: unknown): v is number =>
     typeof v === "number" && Number.isFinite(v);
 
-  const sharePrice = isFiniteNum(c.sharePrice) ? c.sharePrice : null;
-  if (sharePrice === null) return null;
+  // All three totals are required: defaulting a missing total to 0 would be
+  // reported as a critical drift that never existed.
+  if (
+    !isFiniteNum(c.sharePrice) ||
+    !isFiniteNum(c.totalShares) ||
+    !isFiniteNum(c.totalAssets)
+  ) {
+    return null;
+  }
 
   return {
     vaultId:
       typeof c.vaultId === "string" && c.vaultId.trim() !== ""
         ? c.vaultId.trim()
         : "",
-    sharePrice,
-    totalShares: isFiniteNum(c.totalShares) ? c.totalShares : 0,
-    totalAssets: isFiniteNum(c.totalAssets) ? c.totalAssets : 0,
+    sharePrice: c.sharePrice,
+    totalShares: c.totalShares,
+    totalAssets: c.totalAssets,
     snapshotAt:
       typeof c.snapshotAt === "string" &&
       !Number.isNaN(Date.parse(c.snapshotAt))
@@ -162,13 +172,22 @@ export function createVaultSharePriceReconcileRouter(
             `Event #${i} is invalid: ${problem}`,
           );
         }
+        const eventVaultId = (body.events[i] as { vaultId: string }).vaultId;
+        if (eventVaultId !== vaultId) {
+          return sendError(
+            res,
+            400,
+            "INVALID_EVENT",
+            `Event #${i} belongs to vault "${eventVaultId}", not "${vaultId}".`,
+          );
+        }
       }
 
       const cachedRaw = body.cachedSnapshot;
       let cached: CachedSharePrice | undefined;
       if (cachedRaw !== undefined) {
-        cached = validateCachedSnapshot(cachedRaw);
-        if (cached === null) {
+        const parsed = validateCachedSnapshot(cachedRaw);
+        if (parsed === null) {
           return sendError(
             res,
             400,
@@ -176,6 +195,7 @@ export function createVaultSharePriceReconcileRouter(
             "If provided, `cachedSnapshot` must include a finite numeric `sharePrice`, `totalShares`, and `totalAssets`.",
           );
         }
+        cached = parsed;
       }
 
       try {
@@ -218,14 +238,21 @@ export function createVaultSharePriceReconcileRouter(
       const status = req.query.status
         ? String(req.query.status)
         : undefined;
+      if (status !== undefined && !RECON_STATUSES.includes(status as SharePriceReconStatus)) {
+        return sendError(
+          res,
+          400,
+          "MALFORMED_INPUT",
+          `Query parameter \`status\` must be one of ${RECON_STATUSES.join(", ")}.`,
+        );
+      }
 
-      const history = service.getHistory(vaultId || undefined);
-
-      const filtered = (
-        status
-          ? history.filter((e) => e.status === status)
-          : history
-      ).slice(0, limit);
+      // Newest first, so the latest run is always data[0].
+      const filtered = service.queryHistory({
+        vaultId: vaultId || undefined,
+        status: status as SharePriceReconStatus | undefined,
+        limit,
+      });
 
       res.json(toJSONSafe({ vaultId, count: filtered.length, limit, data: filtered }));
     },

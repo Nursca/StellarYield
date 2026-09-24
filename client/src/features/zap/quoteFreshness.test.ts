@@ -1,12 +1,86 @@
 import { describe, it, expect } from "vitest";
 import {
   ZAP_QUOTE_TTL_MS,
+  ZAP_QUOTE_EXPIRED_MESSAGE,
   buildZapQuoteRequestKey,
+  evaluateZapQuoteInvalidation,
   isZapQuoteExpired,
   quoteAgeSeconds,
   recalculateMinOut,
 } from "./quoteFreshness";
 import { minAmountAfterSlippage } from "./slippage";
+
+describe("evaluateZapQuoteInvalidation", () => {
+  const now = 1_700_000_000_000;
+
+  it("reports a fresh quote as valid with remaining time", () => {
+    const quote = {
+      quotedAt: new Date(now - 10_000).toISOString(),
+      expiresAt: new Date(now + 50_000).toISOString(),
+    };
+    const result = evaluateZapQuoteInvalidation(quote, now);
+    expect(result.status).toBe("valid");
+    if (result.status === "valid") {
+      expect(result.remainingMs).toBe(50_000);
+      expect(result.ageMs).toBe(10_000);
+    }
+  });
+
+  it("invalidates one millisecond after expiresAt with expiredForMs", () => {
+    const quote = {
+      quotedAt: new Date(now - 60_000).toISOString(),
+      expiresAt: new Date(now).toISOString(),
+    };
+    expect(evaluateZapQuoteInvalidation(quote, now).status).toBe("valid");
+    const expired = evaluateZapQuoteInvalidation(quote, now + 1);
+    expect(expired.status).toBe("expired");
+    if (expired.status === "expired") {
+      expect(expired.expiredForMs).toBe(1);
+    }
+  });
+
+  it("falls back to quotedAt + TTL when expiresAt is missing", () => {
+    const quote = { quotedAt: new Date(now).toISOString() };
+    expect(evaluateZapQuoteInvalidation(quote, now + ZAP_QUOTE_TTL_MS).status).toBe("valid");
+    expect(
+      evaluateZapQuoteInvalidation(quote, now + ZAP_QUOTE_TTL_MS + 1).status,
+    ).toBe("expired");
+  });
+
+  it("falls back to quotedAt + TTL when expiresAt is unparseable", () => {
+    const quote = {
+      quotedAt: new Date(now).toISOString(),
+      expiresAt: "not-a-timestamp",
+    };
+    expect(evaluateZapQuoteInvalidation(quote, now + ZAP_QUOTE_TTL_MS).status).toBe("valid");
+    expect(
+      evaluateZapQuoteInvalidation(quote, now + ZAP_QUOTE_TTL_MS + 1).status,
+    ).toBe("expired");
+  });
+
+  it("fails closed when quotedAt itself is unparseable", () => {
+    const result = evaluateZapQuoteInvalidation(
+      { quotedAt: "not-a-timestamp" },
+      now,
+    );
+    expect(result.status).toBe("expired");
+  });
+
+  it("isZapQuoteExpired agrees with the typed evaluation", () => {
+    const quote = {
+      quotedAt: new Date(now - 60_000).toISOString(),
+      expiresAt: new Date(now).toISOString(),
+    };
+    expect(isZapQuoteExpired(quote, now)).toBe(false);
+    expect(isZapQuoteExpired(quote, now + 1)).toBe(true);
+  });
+});
+
+describe("ZAP_QUOTE_EXPIRED_MESSAGE", () => {
+  it("is the deterministic user-facing expiry copy", () => {
+    expect(ZAP_QUOTE_EXPIRED_MESSAGE).toBe("Quote expired. Refresh and try again.");
+  });
+});
 
 describe("isZapQuoteExpired", () => {
   it("returns false before expiresAt", () => {

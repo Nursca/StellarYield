@@ -43,7 +43,7 @@ tags:
       |---|---|---|
       | `MISSING_FIELDS` | 400 | Required request fields are missing. |
       | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
-      | `STALE_QUOTE` | 400 / 422 | The provided quote has expired (older than 60s) and must be refreshed. |
+      | `STALE_QUOTE` | 400 / 422 | The provided quote is past its `expiresAt` (TTL configured via `ZAP_QUOTE_TTL_MS`, default 60s) and must be refreshed. Responses carry `recoverable: true`. |
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
@@ -804,6 +804,7 @@ paths:
                   value:
                     error: "STALE_QUOTE"
                     message: "Quote has expired"
+                    recoverable: true
                 unsupportedAsset:
                   summary: UNSUPPORTED_ASSET
                   value:
@@ -3620,7 +3621,7 @@ components:
         expiresAt:
           type: string
           format: date-time
-          description: ISO-8601 timestamp when the quote expires (quotedAt + 60s)
+          description: ISO-8601 timestamp when the quote expires (quotedAt + ZAP_QUOTE_TTL_MS, default 60s)
           example: "2026-07-26T12:01:00.000Z"
         routeHash:
           type: string
@@ -3687,9 +3688,17 @@ components:
         details:
           type: object
           description: Optional structured error details
+        recoverable:
+          type: boolean
+          description: >
+            When true, the client can recover by requesting a fresh quote or
+            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
+            UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
+            validation failures that require changing inputs.
       example:
         error: "STALE_QUOTE"
         message: "Quote has expired"
+        recoverable: true
 
     ZapSupportedAssetsResponse:
       type: object

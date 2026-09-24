@@ -6,14 +6,20 @@ import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
-import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote } from "./fetchSwapQuote";
+import {
+  describeZapQuoteVerifyFailure,
+  fetchSwapQuote,
+  isQuoteCancellation,
+  verifySwapQuote,
+  ZapQuoteError,
+} from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
-  isZapQuoteExpired,
+  evaluateZapQuoteInvalidation,
   quoteAgeSeconds,
   recalculateMinOut,
+  ZAP_QUOTE_EXPIRED_MESSAGE,
 } from "./quoteFreshness";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
@@ -41,10 +47,6 @@ const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
 const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
-
-function quoteAgeSeconds(quotedAt: string): number {
-  return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
-}
 
 function explorerAccountUrl(walletAddress: string | null): string {
   const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
@@ -260,10 +262,23 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     return recalculateMinOut(expectedOut ?? 0n, slippageTolerance, minAmountAfterSlippage);
   }, [expectedOut, slippageTolerance]);
 
-  const isStale = useMemo(() => {
-    if (!quoteData) return false;
-    return isZapQuoteExpired(quoteData, quoteNowMs);
-  }, [quoteData, quoteNowMs]);
+  const quoteInvalidation = useMemo(
+    () => (quoteData ? evaluateZapQuoteInvalidation(quoteData, quoteNowMs) : null),
+    [quoteData, quoteNowMs],
+  );
+
+  const isStale = quoteInvalidation?.status === "expired";
+
+  /** Hard-invalidate the current preview so rejected/expired values cannot be reused. */
+  const invalidatePreview = useCallback(() => {
+    prevExpectedOutRef.current = null;
+    prevRouteRef.current = null;
+    latestRouteRef.current = null;
+    setExpectedOut(null);
+    setQuotePath("");
+    setQuoteSource("");
+    setQuoteData(null);
+  }, []);
 
   const isFallback = useMemo(() => {
     if (!quoteData) return false;
@@ -332,8 +347,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       setError("Wait for a valid quote or reduce slippage");
       return;
     }
-    if (quoteData && isZapQuoteExpired(quoteData)) {
-      setError("Quote expired. Refresh and try again.");
+    if (quoteData && evaluateZapQuoteInvalidation(quoteData).status === "expired") {
+      setError(ZAP_QUOTE_EXPIRED_MESSAGE);
       return;
     }
 
@@ -346,11 +361,28 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setShowFailedModal(false);
     try {
       if (quoteData) {
-        const isValid = await verifySwapQuote(quoteData);
-        if (!isValid) {
-          setError('Quote validation failed. Please refresh and try again.');
-          setShowFailedModal(true);
-          return;
+        try {
+          const isValid = await verifySwapQuote(quoteData);
+          if (!isValid) {
+            invalidatePreview();
+            setStatus("error");
+            setError("Quote validation failed. Refresh and try again.");
+            return;
+          }
+        } catch (verifyErr) {
+          if (isQuoteCancellation(verifyErr)) {
+            throw verifyErr;
+          }
+          if (verifyErr instanceof ZapQuoteError) {
+            // The server rejected this exact quote — invalidate the preview and
+            // surface a deterministic, code-mapped message (no raw parsing).
+            invalidatePreview();
+            setQuoteError(verifyErr);
+            setStatus("error");
+            setError(describeZapQuoteVerifyFailure(verifyErr));
+            return;
+          }
+          throw verifyErr;
         }
       }
       const result = await zapDeposit(
@@ -388,6 +420,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     emitPhase,
     settings,
     quoteData,
+    invalidatePreview,
   ]);
 
   const retryZap = useCallback(() => {
@@ -451,16 +484,27 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
-      {/* Stale quote warning */}
+      {/* Expired quote invalidation banner */}
       {isStale && !quoteLoading && (
-        <div className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3">
+        <div
+          className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3"
+          role="alert"
+        >
           <Clock className="w-4 h-4 shrink-0 mt-0.5 text-orange-400" />
-          <div>
-            <p className="font-medium text-orange-300">Stale quote</p>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-orange-300">Quote expired</p>
             <p className="text-xs text-orange-200/70">
-              Quote is over 60 seconds old. Refresh for current rates.
+              Preview is no longer valid. Refresh for current rates.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={() => void refreshQuote()}
+            disabled={quoteLoading}
+            className="shrink-0 self-center rounded-lg bg-orange-500/20 px-2.5 py-1 text-xs font-medium text-orange-100 hover:bg-orange-500/30 disabled:opacity-50"
+          >
+            Refresh quote
+          </button>
         </div>
       )}
 

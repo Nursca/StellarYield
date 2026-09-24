@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import ZapDepositPanel from "./ZapDepositPanel";
@@ -143,8 +143,8 @@ describe("ZapDepositPanel", () => {
     });
   });
 
-  describe("stale quote state", () => {
-    it("shows stale quote warning when quote is old", async () => {
+  describe("expired quote state", () => {
+    it("shows the expired invalidation banner when the quote TTL has elapsed", async () => {
       const staleQuotedAt = new Date(Date.now() - 120_000).toISOString();
       mockFetch.mockResolvedValue({
         ok: true,
@@ -157,11 +157,19 @@ describe("ZapDepositPanel", () => {
       await userEvent.type(input, "100");
 
       await waitFor(() => {
-        expect(screen.getByText("Stale quote")).toBeInTheDocument();
+        expect(screen.getByText("Quote expired")).toBeInTheDocument();
       });
+
+      const banner = screen
+        .getAllByRole("alert")
+        .find((el) => el.textContent?.includes("Quote expired"));
+      expect(banner).toBeTruthy();
+      expect(
+        within(banner!).getByRole("button", { name: /refresh quote/i }),
+      ).toBeInTheDocument();
     });
 
-    it("blocks submission when quote is stale", async () => {
+    it("blocks submission when quote has expired", async () => {
       const staleQuotedAt = new Date(Date.now() - 120_000).toISOString();
       mockFetch.mockResolvedValue({
         ok: true,
@@ -179,6 +187,96 @@ describe("ZapDepositPanel", () => {
 
       const submitBtn = screen.getByRole("button", { name: /zap deposit|deposit/i });
       expect(submitBtn).toBeDisabled();
+    });
+  });
+
+  describe("server-side quote invalidation on verify", () => {
+    function mockFreshQuoteThenVerify(
+      verifyBody: { error: string; message: string; recoverable?: boolean },
+    ) {
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes("/api/zap/verify")) {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => verifyBody,
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () =>
+            createMockQuote({
+              quotedAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+        });
+      });
+    }
+
+    it("invalidates the preview and shows the deterministic STALE_QUOTE message", async () => {
+      mockFreshQuoteThenVerify({
+        error: "STALE_QUOTE",
+        message: "Quote has expired",
+        recoverable: true,
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("Quote expired. Refresh and try again."),
+        ).toBeInTheDocument();
+      });
+
+      // Preview hard-invalidated: expected output cleared to the empty state.
+      await waitFor(() => {
+        expect(screen.getByText("—")).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText("Min. after", { exact: false }),
+      ).not.toBeInTheDocument();
+
+      // Server flagged the failure recoverable → retry action is offered.
+      expect(
+        screen.getByRole("button", { name: /retry quote/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the deterministic CONFIG_DRIFT message without echoing server text", async () => {
+      mockFreshQuoteThenVerify({
+        error: "CONFIG_DRIFT",
+        message: "Asset configuration has drifted",
+        recoverable: true,
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("Supported assets changed. Refresh and try again."),
+        ).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText("Asset configuration has drifted"),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -316,6 +414,9 @@ describe("ZapDepositPanel", () => {
       expect(screen.queryByRole("link", { name: /view account on explorer/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /contact support/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /retry quote/i })).not.toBeInTheDocument();
+    });
+  });
+
   describe("per-vault preferences", () => {
     beforeEach(() => {
       localStorage.clear();

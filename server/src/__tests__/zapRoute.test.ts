@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import request from "supertest";
 import { createApp } from "../app";
+import { ZAP_QUOTE_EXPIRY_MS } from "../services/zapQuote";
 
 // Mock yieldService to prevent real Stellar network calls during CI
 jest.mock("../services/yieldService", () => ({
@@ -143,6 +144,24 @@ describe("POST /api/zap/quote", () => {
     expect(res.body.issuedAt).toBeDefined();
     expect(res.body.expiresAt).toBeDefined();
   });
+
+  it("sets expiresAt exactly ZAP_QUOTE_EXPIRY_MS after quotedAt", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/quote")
+      .send({
+        inputTokenContract: SAME_TOKEN,
+        vaultTokenContract: SAME_TOKEN,
+        amountInStroops: "1000",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+      });
+
+    expect(res.status).toBe(200);
+    const delta =
+      new Date(res.body.expiresAt).getTime() -
+      new Date(res.body.quotedAt).getTime();
+    expect(delta).toBe(ZAP_QUOTE_EXPIRY_MS);
+  });
 });
 
 // ── POST /api/zap/verify ───────────────────────────────────────────────
@@ -239,6 +258,31 @@ describe("POST /api/zap/verify", () => {
     expect(res.body).toMatchObject(OPENAPI_ERROR_EXAMPLE_SHAPE);
     expect(res.body.error).toBe("STALE_QUOTE");
     expect(res.body.message).toMatch(/expired/i);
+    // Refreshing recovers from an expired quote, so it is flagged recoverable.
+    expect(res.body.recoverable).toBe(true);
+  });
+
+  it("returns 400 with STALE_QUOTE when expiresAt is missing", async () => {
+    const quote = validQuote();
+    delete (quote as { expiresAt?: string }).expiresAt;
+
+    const res = await request(createApp())
+      .post("/api/zap/verify")
+      .send(quote);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("STALE_QUOTE");
+    expect(res.body.recoverable).toBe(true);
+  });
+
+  it("does not mark SLIPPAGE_EXCEEDED as recoverable", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/verify")
+      .send(validQuote({ slippageApplied: 0.185 }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("SLIPPAGE_EXCEEDED");
+    expect(res.body.recoverable).toBeUndefined();
   });
 
   it("returns 400 with UNSUPPORTED_ASSET when path contains an unknown contract", async () => {

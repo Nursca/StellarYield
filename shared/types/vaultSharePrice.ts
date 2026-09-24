@@ -28,13 +28,20 @@ import type {
  * projection. Each event contributes a deterministic delta to
  * (totalAssets, totalShares).
  *
- * Event signatures (from `contracts/yield_vault/src/lib.rs`):
- *   deposit         (from, amount, shares)                       → assets += amount, shares += shares
- *   withdraw        (to, amount, shares)                         → assets -= amount, shares -= shares
- *   deposit_for     (payer, beneficiary, amount, shares)          → assets += amount, shares += shares
- *   harvest         (caller, reward, amount_out, keeper_fee)    → assets += (amountOut - keeperFee)
- *   rebalance       (target, amount)                             → assets -= amount
- *   transfer_shares (from, to, shares)                          → no net change (share transfer)
+ * Event signatures (from `contracts/yield_vault/src/`; on-chain topic in brackets):
+ *   deposit            [deposit]  (from, amount, shares)                    → assets += amount, shares += shares
+ *   withdraw           [withdraw] (to, amount, shares)                      → assets -= amount, shares -= shares
+ *   deposit_for        [dep_for]  (payer, beneficiary, amount, shares)      → assets += amount, shares += shares
+ *   harvest            [harvest]  (caller, reward, amount_out, keeper_fee)  → assets += (amountOut - keeperFee)
+ *   rebalance          [rebal]    (target, amount)                          → assets -= amount
+ *   transfer_shares    [tr_sh]    (from, to, shares)                        → no net change (share transfer)
+ *   flash_loan         [flash]    (initiator, receiver, amount, fee)        → assets += fee
+ *   emergency_withdraw [emg_wd]   (to, net_amount, shares, penalty_bps)     → assets -= netAmount, shares -= shares
+ *   rescue             [rescue]   (admin, target, amount)                   → assets -= amount (floored at 0)
+ *
+ * For `harvest`, `amount` carries `amount_out`; for `flash_loan`, `amount`
+ * carries the premium `fee` (the principal is repaid in the same call and does
+ * not move the totals).
  *
  * Amounts are carried as integer strings to preserve precision across the
  * JSON boundary (mirroring the existing `VaultActivityEvent.amount` pattern).
@@ -45,7 +52,10 @@ export type VaultSharePriceEventType =
   | "deposit_for"
   | "harvest"
   | "rebalance"
-  | "transfer_shares";
+  | "transfer_shares"
+  | "flash_loan"
+  | "emergency_withdraw"
+  | "rescue";
 
 /** Events that change totalAssets (and possibly shares). */
 export const ASSET_MOVING_EVENT_TYPES: readonly VaultSharePriceEventType[] = [
@@ -54,6 +64,9 @@ export const ASSET_MOVING_EVENT_TYPES: readonly VaultSharePriceEventType[] = [
   "deposit_for",
   "harvest",
   "rebalance",
+  "flash_loan",
+  "emergency_withdraw",
+  "rescue",
 ] as const;
 
 /** Every recognized YieldVault event type, as a runtime array for validation. */
@@ -64,13 +77,38 @@ export const VAULT_SHARE_PRICE_EVENT_TYPES: readonly VaultSharePriceEventType[] 
   "harvest",
   "rebalance",
   "transfer_shares",
+  "flash_loan",
+  "emergency_withdraw",
+  "rescue",
 ] as const;
+
+/**
+ * On-chain event topic (the `symbol_short!` the YieldVault publishes) → event
+ * type. Indexers use this to normalize raw contract events; topics not listed
+ * here do not move the vault totals and should not be forwarded.
+ */
+export const CONTRACT_TOPIC_TO_EVENT_TYPE: Readonly<Record<string, VaultSharePriceEventType>> = {
+  deposit: "deposit",
+  withdraw: "withdraw",
+  dep_for: "deposit_for",
+  harvest: "harvest",
+  rebal: "rebalance",
+  tr_sh: "transfer_shares",
+  flash: "flash_loan",
+  emg_wd: "emergency_withdraw",
+  rescue: "rescue",
+};
 
 /** True when an event mints or burns shares (and therefore moves totalShares). */
 export function isShareMovingEvent(
   eventType: VaultSharePriceEventType,
 ): boolean {
-  return eventType === "deposit" || eventType === "deposit_for" || eventType === "withdraw";
+  return (
+    eventType === "deposit" ||
+    eventType === "deposit_for" ||
+    eventType === "withdraw" ||
+    eventType === "emergency_withdraw"
+  );
 }
 
 export interface VaultSharePriceEvent {
@@ -85,7 +123,7 @@ export interface VaultSharePriceEvent {
   eventType: VaultSharePriceEventType;
   /** Integer-string amount to avoid float loss (USDC micro-units, etc.). */
   amount: string;
-  /** Shares for deposit/withdraw/deposit_for; shares moved for transfer_shares. */
+  /** Shares for deposit/withdraw/deposit_for/emergency_withdraw; shares moved for transfer_shares. */
   shares?: string;
   /** Keeper fee taken on harvest; the remainder auto-compounds to assets. */
   keeperFee?: string;

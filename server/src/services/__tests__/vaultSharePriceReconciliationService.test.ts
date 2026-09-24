@@ -35,7 +35,7 @@ import {
 // ── Builders ───────────────────────────────────────────────────────────────────
 
 function makeEvent(
-  overrides: Partial<VaultSharePriceEvent> & { eventType: VaultSharePriceEvent["eventType"] },
+  overrides: Partial<VaultSharePriceEvent> = {},
 ): VaultSharePriceEvent {
   return {
     vaultId: "vault-1",
@@ -464,8 +464,8 @@ describe("VaultSharePriceReconciliationService", () => {
     resetSharePriceReconHistory();
   });
 
-  function eventsFromContract(assets: number, shares: number) {
-    return [makeEvent({ eventType: "deposit", amount: String(assets), shares: String(shares) })];
+  function eventsFromContract(assets: number, shares: number, vaultId = "vault-1") {
+    return [makeEvent({ vaultId, eventType: "deposit", amount: String(assets), shares: String(shares) })];
   }
 
   it("reconcileVault returns success when contract and cache agree", async () => {
@@ -548,8 +548,8 @@ describe("VaultSharePriceReconciliationService", () => {
     const service = new VaultSharePriceReconciliationService({
       cacheLoader: { loadSharePrice: () => Promise.resolve(baseCached()) },
     });
-    await service.reconcileVault("vault-A", eventsFromContract(1_000_000, 1_000_000));
-    await service.reconcileVault("vault-B", eventsFromContract(1_000_000, 1_000_000));
+    await service.reconcileVault("vault-A", eventsFromContract(1_000_000, 1_000_000, "vault-A"));
+    await service.reconcileVault("vault-B", eventsFromContract(1_000_000, 1_000_000, "vault-B"));
     expect(service.getHistory("vault-A")).toHaveLength(1);
     expect(service.getHistory("vault-A")[0].vaultId).toBe("vault-A");
   });
@@ -579,5 +579,167 @@ describe("status type", () => {
     const r = reconcileSharePrice(contractState, baseCached(), { vaultId: "v" });
     const valid: SharePriceReconStatus = r.status;
     expect(["success", "partial", "failed"]).toContain(valid);
+  });
+});
+
+// ── Full contract event vocabulary ────────────────────────────────────────────
+
+describe("contract event vocabulary (flash_loan / emergency_withdraw / rescue)", () => {
+  beforeEach(() => {
+    resetSharePriceReconHistory();
+  });
+
+  it("flash_loan grows assets by the premium only", () => {
+    expect(eventDelta(makeEvent({ eventType: "flash_loan", amount: "90" }))).toEqual({
+      assetsDelta: 90n,
+      sharesDelta: 0n,
+    });
+  });
+
+  it("emergency_withdraw burns shares and removes the net amount paid out", () => {
+    expect(
+      eventDelta(makeEvent({ eventType: "emergency_withdraw", amount: "450", shares: "500" })),
+    ).toEqual({ assetsDelta: -450n, sharesDelta: -500n });
+  });
+
+  it("emergency_withdraw without shares throws INVALID_EVENT", () => {
+    expect(() =>
+      eventDelta(makeEvent({ eventType: "emergency_withdraw", amount: "450" })),
+    ).toThrow(expect.objectContaining({ code: "INVALID_EVENT" }));
+  });
+
+  it("rescue floors totalAssets at zero like the contract does", () => {
+    const { state } = replayVaultEvents([
+      makeEvent({ eventType: "deposit", amount: "1000", shares: "1000", ledger: 1, txHash: "a" }),
+      makeEvent({ eventType: "rescue", amount: "5000", ledger: 2, txHash: "b" }),
+    ]);
+    expect(state.totalAssets).toBe(0n);
+    expect(state.totalShares).toBe(1000n);
+  });
+
+  it("rejects a signed (negative) amount instead of flipping the delta", () => {
+    expect(() => eventDelta(makeEvent({ eventType: "deposit", amount: "-5", shares: "5" }))).toThrow(
+      expect.objectContaining({ code: "MALFORMED_INPUT" }),
+    );
+  });
+
+  it("replays a full lifecycle to the contract share price", async () => {
+    // deposit 1_000_000 @ 1:1, harvest +100_000 net (fee 10_000), flash fee +5_000,
+    // withdraw 200_000 shares for 221_000 assets, emergency withdraw 100_000 shares
+    // for 99_000 net, rescue 1_000, transfer_shares (no-op).
+    const events = [
+      makeEvent({ eventType: "deposit", amount: "1000000", shares: "1000000", ledger: 1, txHash: "t1" }),
+      makeEvent({ eventType: "harvest", amount: "110000", keeperFee: "10000", ledger: 2, txHash: "t2" }),
+      makeEvent({ eventType: "flash_loan", amount: "5000", ledger: 3, txHash: "t3" }),
+      makeEvent({ eventType: "withdraw", amount: "221000", shares: "200000", ledger: 4, txHash: "t4" }),
+      makeEvent({ eventType: "emergency_withdraw", amount: "99000", shares: "100000", ledger: 5, txHash: "t5" }),
+      makeEvent({ eventType: "rescue", amount: "1000", ledger: 6, txHash: "t6" }),
+      makeEvent({ eventType: "transfer_shares", amount: "0", shares: "50", ledger: 7, txHash: "t7" }),
+    ];
+    const expectedAssets = 1_000_000 + 100_000 + 5_000 - 221_000 - 99_000 - 1_000; // 784_000
+    const expectedShares = 700_000;
+
+    const service = new VaultSharePriceReconciliationService({ cacheLoader: null as never });
+    const r = await service.reconcileVault(
+      "vault-1",
+      events,
+      baseCached({
+        totalAssets: expectedAssets,
+        totalShares: expectedShares,
+        sharePrice: expectedAssets / expectedShares,
+      }),
+    );
+    expect(r.contractState?.totalAssets).toBe(BigInt(expectedAssets));
+    expect(r.contractState?.totalShares).toBe(BigInt(expectedShares));
+    expect(r.status).toBe("success");
+    expect(r.causes).toEqual([]);
+  });
+
+  it("flags a cache that missed a flash_loan premium as drift", async () => {
+    const service = new VaultSharePriceReconciliationService({ cacheLoader: null as never });
+    const r = await service.reconcileVault(
+      "vault-1",
+      [
+        makeEvent({ eventType: "deposit", amount: "1000000", shares: "1000000", ledger: 1, txHash: "t1" }),
+        makeEvent({ eventType: "flash_loan", amount: "200000", ledger: 2, txHash: "t2" }),
+      ],
+      baseCached(), // cache still at 1_000_000 / 1_000_000
+    );
+    expect(r.status).toBe("partial");
+    expect(r.primaryCause).toBe("AMOUNT_DRIFT");
+    expect(r.assetsAgree).toBe(false);
+    expect(r.sharesAgree).toBe(true);
+  });
+
+  it("rejects events for a different vault than requested", async () => {
+    const service = new VaultSharePriceReconciliationService({ cacheLoader: null as never });
+    await expect(
+      service.reconcileVault(
+        "vault-2",
+        [makeEvent({ vaultId: "vault-1", amount: "1000", shares: "1000" })],
+        baseCached(),
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_EVENT" });
+  });
+});
+
+describe("loadLatestSharePriceSnapshot", () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.dontMock("@prisma/client");
+  });
+
+  it("maps the single row returned by findFirst to a cached snapshot", async () => {
+    const snapshotAt = new Date("2026-09-01T00:00:00.000Z");
+    jest.doMock("@prisma/client", () => ({
+      PrismaClient: class {
+        sharePriceSnapshot = {
+          findFirst: jest.fn().mockResolvedValue({
+            sharePrice: 1.25,
+            totalShares: 800,
+            totalAssets: 1000,
+            snapshotAt,
+          }),
+        };
+        $disconnect = jest.fn().mockResolvedValue(undefined);
+      },
+    }));
+    const mod = await import("../vaultSharePriceReconciliationService");
+    await expect(mod.loadLatestSharePriceSnapshot("vault-1")).resolves.toEqual({
+      vaultId: "vault-1",
+      sharePrice: 1.25,
+      totalShares: 800,
+      totalAssets: 1000,
+      snapshotAt: snapshotAt.toISOString(),
+      projectionVersion: undefined,
+      lastLedger: undefined,
+      projectionAgeMs: undefined,
+    });
+  });
+
+  it("returns null when no snapshot exists", async () => {
+    jest.doMock("@prisma/client", () => ({
+      PrismaClient: class {
+        sharePriceSnapshot = { findFirst: jest.fn().mockResolvedValue(null) };
+        $disconnect = jest.fn().mockResolvedValue(undefined);
+      },
+    }));
+    const mod = await import("../vaultSharePriceReconciliationService");
+    await expect(mod.loadLatestSharePriceSnapshot("vault-1")).resolves.toBeNull();
+  });
+});
+
+describe("history store", () => {
+  beforeEach(() => resetSharePriceReconHistory());
+
+  it("evicts the oldest entries past SHARE_PRICE_RECON_HISTORY_LIMIT", async () => {
+    const { SHARE_PRICE_RECON_HISTORY_LIMIT } = await import(
+      "../vaultSharePriceReconciliationService"
+    );
+    const service = new VaultSharePriceReconciliationService({ cacheLoader: null as never });
+    for (let i = 0; i < SHARE_PRICE_RECON_HISTORY_LIMIT + 5; i += 1) {
+      await service.reconcileVault("vault-1", [], baseCached());
+    }
+    expect(getSharePriceReconHistory()).toHaveLength(SHARE_PRICE_RECON_HISTORY_LIMIT);
   });
 });

@@ -4,8 +4,8 @@
  * The YieldVault contract does not emit an explicit "share price" event — the
  * share price is a *derived* quantity, `total_assets / total_shares`, where both
  * totals mutate only through a fixed set of contract events (deposit, withdraw,
- * deposit_for, harvest, rebalance, transfer_shares; see
- * `contracts/yield_vault/src/lib.rs`).
+ * deposit_for, harvest, rebalance, transfer_shares, flash_loan,
+ * emergency_withdraw, rescue; see `contracts/yield_vault/src/`).
  *
  * This service reconstructs the contract-authoritative totals from an event log
  * and compares them against the backend `SharePriceSnapshot` cache, surfacing
@@ -73,13 +73,18 @@ export const VAULT_SHARE_PRICE_PRECISION = 1_000_000_000_000_000_000n;
 
 // ── Input validation helpers (pure) ───────────────────────────────────────────
 
-const INTEGER_STRING = /^-?\d+$/;
+const UNSIGNED_INTEGER_STRING = /^\d+$/;
 
+/**
+ * Parse a non-negative integer string. The contract rejects zero/negative
+ * amounts and never emits a signed value, so a leading "-" means the event was
+ * mis-decoded and is rejected rather than silently flipping the delta's sign.
+ */
 function parseAmount(value: string, field: string): bigint {
-  if (typeof value !== "string" || !INTEGER_STRING.test(value)) {
+  if (typeof value !== "string" || !UNSIGNED_INTEGER_STRING.test(value)) {
     throw new VaultSharePriceError(
       "MALFORMED_INPUT",
-      `${field} must be an integer string, got ${JSON.stringify(value)}`,
+      `${field} must be a non-negative integer string, got ${JSON.stringify(value)}`,
     );
   }
   return BigInt(value);
@@ -114,6 +119,8 @@ function requireKeeperFee(event: VaultSharePriceEvent): bigint {
 interface EventDelta {
   assetsDelta: bigint;
   sharesDelta: bigint;
+  /** Clamp totalAssets at 0 instead of treating an underflow as corrupt data. */
+  floorAssetsAtZero?: boolean;
 }
 
 /**
@@ -131,7 +138,10 @@ export function eventDelta(event: VaultSharePriceEvent): EventDelta {
       const shares = requireShares(event);
       return { assetsDelta: amount, sharesDelta: shares };
     }
-    case "withdraw": {
+    case "withdraw":
+    case "emergency_withdraw": {
+      // emergency_withdraw carries the post-penalty net amount actually paid
+      // out, which is exactly what the contract subtracts from totalAssets.
       const shares = requireShares(event);
       return { assetsDelta: -amount, sharesDelta: -shares };
     }
@@ -146,6 +156,14 @@ export function eventDelta(event: VaultSharePriceEvent): EventDelta {
     case "transfer_shares": {
       // Share transfer between users — no effect on vault totals.
       return { assetsDelta: 0n, sharesDelta: 0n };
+    }
+    case "flash_loan": {
+      // `amount` is the premium; the principal is repaid within the call.
+      return { assetsDelta: amount, sharesDelta: 0n };
+    }
+    case "rescue": {
+      // The contract floors totalAssets at zero; replay applies the same clamp.
+      return { assetsDelta: -amount, sharesDelta: 0n, floorAssetsAtZero: true };
     }
     default:
       throw new VaultSharePriceError(
@@ -266,9 +284,10 @@ export function replayVaultEvents(
   let lastTxHash = deduped[0].txHash;
 
   for (const event of deduped) {
-    const { assetsDelta, sharesDelta } = eventDelta(event);
+    const { assetsDelta, sharesDelta, floorAssetsAtZero } = eventDelta(event);
     totalAssets += assetsDelta;
     totalShares += sharesDelta;
+    if (floorAssetsAtZero && totalAssets < 0n) totalAssets = 0n;
 
     if (totalAssets < 0n) {
       throw new VaultSharePriceError(
@@ -480,7 +499,7 @@ export function reconcileSharePrice(
         cause(
           "AMOUNT_DRIFT",
           `totalShares drift: contract reconstructed ${contractShares} vs cache ${cachedShares} (delta ${sharesDrift.delta}, ${formatPct(sharesDrift.deltaPct)}).`,
-          { contractValue: contractShares, cachedValue: cachedShares, deltaPct: sharesDrift.deltaPct, lastLedger: contractState.lastLedger, eventCount: contractState.eventCount },
+          { contractValue: contractShares, cachedValue: cachedShares, deltaPct: sharesDrift.deltaPct ?? undefined, lastLedger: contractState.lastLedger, eventCount: contractState.eventCount },
           vaultId,
         ),
       );
@@ -505,7 +524,7 @@ export function reconcileSharePrice(
         cause(
           "AMOUNT_DRIFT",
           `totalAssets drift: contract reconstructed ${contractAssets} vs cache ${cachedAssets} (delta ${assetsDrift.delta}, ${formatPct(assetsDrift.deltaPct)}).`,
-          { contractValue: contractAssets, cachedValue: cachedAssets, deltaPct: assetsDrift.deltaPct, lastLedger: contractState.lastLedger, eventCount: contractState.eventCount },
+          { contractValue: contractAssets, cachedValue: cachedAssets, deltaPct: assetsDrift.deltaPct ?? undefined, lastLedger: contractState.lastLedger, eventCount: contractState.eventCount },
           vaultId,
         ),
       );
@@ -530,7 +549,7 @@ export function reconcileSharePrice(
           cause(
             "AMOUNT_DRIFT",
             `share price drift: contract-derived ${round(contractSharePrice)} vs cache ${round(cachedState.sharePrice)} (delta ${round(priceDrift.delta)}, ${formatPct(priceDrift.deltaPct)}).`,
-            { contractValue: contractSharePrice, cachedValue: cachedState.sharePrice, deltaPct: priceDrift.deltaPct, eventCount: contractState.eventCount },
+            { contractValue: contractSharePrice, cachedValue: cachedState.sharePrice, deltaPct: priceDrift.deltaPct ?? undefined, eventCount: contractState.eventCount },
             vaultId,
           ),
         );
@@ -678,6 +697,9 @@ export interface SharePriceReconHistoryEntry
   id: string;
 }
 
+/** Oldest entries are evicted past this size so the store cannot grow unbounded. */
+export const SHARE_PRICE_RECON_HISTORY_LIMIT = 1000;
+
 const historyStore: SharePriceReconHistoryEntry[] = [];
 
 export function resetSharePriceReconHistory(): void {
@@ -736,7 +758,7 @@ export interface SharePriceCacheLoader {
  * works without a generated client (mirrors `routes/sharePriceHistory.ts`).
  */
 interface SharePriceSnapshotDelegate {
-  findFirst: (args: unknown) => Promise<PrismaSnapshot[]>;
+  findFirst: (args: unknown) => Promise<PrismaSnapshot | null>;
 }
 
 interface PrismaWithSnapshot {
@@ -775,14 +797,13 @@ export async function loadLatestSharePriceSnapshot(
       return null;
     }
 
-    const rows = await prisma.sharePriceSnapshot.findFirst({
+    const snapshot = await prisma.sharePriceSnapshot.findFirst({
       where: { vaultId },
       orderBy: { snapshotAt: "desc" },
     });
     await prisma.$disconnect?.().catch(() => undefined);
 
-    const snapshot = rows?.[0] ?? null;
-    if (snapshot === null) return null;
+    if (snapshot === null || snapshot === undefined) return null;
     return {
       vaultId,
       sharePrice: snapshot.sharePrice,
@@ -885,6 +906,13 @@ export class VaultSharePriceReconciliationService {
       }
     }
 
+    if (contractState !== null && contractState.vaultId !== vaultId) {
+      throw new VaultSharePriceError(
+        "INVALID_EVENT",
+        `Events belong to vault "${contractState.vaultId}" but reconciliation was requested for "${vaultId}".`,
+      );
+    }
+
     const result = reconcileSharePrice(contractState, resolvedCached, {
       vaultId,
       duplicateEvents: reconstruction?.duplicateCount,
@@ -897,6 +925,11 @@ export class VaultSharePriceReconciliationService {
   getHistory(vaultId?: string): readonly SharePriceReconHistoryEntry[] {
     return getSharePriceReconHistory(vaultId);
   }
+
+  /** Filtered history, newest first. */
+  queryHistory(query: SharePriceReconHistoryQuery): SharePriceReconHistoryEntry[] {
+    return querySharePriceReconHistory(query);
+  }
 }
 
 function persistSharePriceRecon(
@@ -907,6 +940,9 @@ function persistSharePriceRecon(
     id: `sp_recon_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
   };
   historyStore.push(entry);
+  if (historyStore.length > SHARE_PRICE_RECON_HISTORY_LIMIT) {
+    historyStore.splice(0, historyStore.length - SHARE_PRICE_RECON_HISTORY_LIMIT);
+  }
 }
 
 // Re-export the cause descriptor table so the route can serve it without
@@ -916,7 +952,6 @@ export type {
   CachedSharePrice,
   SharePriceMismatch,
   VaultProjectedState,
-  VaultReconstruction,
   VaultSharePriceEvent,
   VaultSharePriceEventType,
 };

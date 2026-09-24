@@ -16,6 +16,51 @@ export interface ZapQuoteBody {
   protocol?: string;
 }
 
+/**
+ * Server-side time-to-live for a zap quote preview, in milliseconds. This is the
+ * source of truth for `expiresAt` on `POST /api/zap/quote` and must be kept in
+ * sync with the client preview guard (`client/src/features/zap/quoteFreshness.ts`
+ * `ZAP_QUOTE_TTL_MS`). Both sides reject a quote whose `expiresAt` has passed.
+ */
+export const ZAP_QUOTE_EXPIRY_MS = parseQuoteExpiryMs(process.env.ZAP_QUOTE_TTL_MS);
+
+/** Parses the `ZAP_QUOTE_TTL_MS` env value; falls back to 60 000 ms when invalid. */
+export function parseQuoteExpiryMs(raw?: string): number {
+  const n = Number.parseInt(raw ?? "60000", 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : 60_000;
+}
+
+/** Minimal shape of a quote used by the expiry check. */
+export interface ZapQuoteExpiryInput {
+  expiresAt?: string;
+}
+
+/**
+ * Pure, deterministic quote-expiry predicate.
+ *
+ * A quote is expired when:
+ *  - it has no `expiresAt` (cannot be proven fresh), or
+ *  - `expiresAt` is not a parseable timestamp, or
+ *  - `expiresAt` is in the past relative to `nowMs`.
+ *
+ * The boundary is exclusive: a quote whose `expiresAt` equals `nowMs` is
+ * still valid. This mirrors the client preview guard so the two sides agree on
+ * the exact instant a quote becomes invalid without parsing provider errors.
+ */
+export function isQuoteExpired(
+  quote: ZapQuoteExpiryInput,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!quote.expiresAt || typeof quote.expiresAt !== "string") {
+    return true;
+  }
+  const expiresMs = new Date(quote.expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) {
+    return true;
+  }
+  return nowMs > expiresMs;
+}
+
 export interface ZapQuoteResult {
   path: { contractId: string; label?: string }[];
   expectedAmountOutStroops: string;
@@ -216,7 +261,7 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   const routeHash = computeRouteHash(sim.path);
   const assetConfigVersion = getAssetConfigVersion();
   const issuedAt = quotedAt;
-  const expiresAt = new Date(quotedAtMs + 60 * 1000).toISOString();
+  const expiresAt = new Date(quotedAtMs + ZAP_QUOTE_EXPIRY_MS).toISOString();
 
   return {
     ...sim,
@@ -233,23 +278,54 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   };
 }
 
-export function verifyZapQuote(quote: any): { valid: boolean; reason?: string; errorCode?: string } {
-  const now = Date.now();
+/**
+ * Machine-readable rejection codes returned by {@link verifyZapQuote}.
+ * The set is closed so clients can map failures to deterministic UI states
+ * without parsing provider message strings.
+ */
+export type ZapQuoteVerificationErrorCode =
+  | "INVALID_QUOTE"
+  | "STALE_QUOTE"
+  | "CONFIG_DRIFT"
+  | "ROUTE_MISMATCH"
+  | "UNSUPPORTED_ASSET"
+  | "SLIPPAGE_EXCEEDED";
+
+/** Result of verifying a previously issued zap quote. */
+export type ZapQuoteVerification =
+  | { valid: true }
+  | { valid: false; reason: string; errorCode: ZapQuoteVerificationErrorCode };
+
+/**
+ * Codes a client can recover from by requesting a fresh quote (as opposed to
+ * changing inputs or an unrecoverable internal failure).
+ */
+export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErrorCode> =
+  new Set<ZapQuoteVerificationErrorCode>([
+    "STALE_QUOTE",
+    "CONFIG_DRIFT",
+    "ROUTE_MISMATCH",
+    "UNSUPPORTED_ASSET",
+  ]);
+
+export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   if (!quote || typeof quote !== "object") {
     return { valid: false, reason: "Invalid quote format", errorCode: "INVALID_QUOTE" };
   }
-  if (!quote.expiresAt || new Date(quote.expiresAt).getTime() < now) {
+  const q = quote as Record<string, unknown>;
+  if (isQuoteExpired(q as ZapQuoteExpiryInput)) {
     return { valid: false, reason: "Quote has expired", errorCode: "STALE_QUOTE" };
   }
   const currentVersion = getAssetConfigVersion();
-  if (quote.assetConfigVersion !== currentVersion) {
+  if (q.assetConfigVersion !== currentVersion) {
     return { valid: false, reason: "Asset configuration has drifted", errorCode: "CONFIG_DRIFT" };
   }
-  if (!quote.path || !Array.isArray(quote.path)) {
+  if (!q.path || !Array.isArray(q.path)) {
     return { valid: false, reason: "Invalid path in quote", errorCode: "ROUTE_MISMATCH" };
   }
-  const currentRouteHash = computeRouteHash(quote.path);
-  if (quote.routeHash !== currentRouteHash) {
+  const path = q.path as { contractId: string }[];
+  const currentRouteHash = computeRouteHash(path);
+  if (q.routeHash !== currentRouteHash) {
     return { valid: false, reason: "Route path mismatch", errorCode: "ROUTE_MISMATCH" };
   }
   // Check unsupported asset transitions
@@ -258,14 +334,14 @@ export function verifyZapQuote(quote: any): { valid: boolean; reason?: string; e
     ...payload.assets.map(a => a.contractId),
     payload.vaultToken.contractId
   ]);
-  for (const hop of quote.path) {
+  for (const hop of path) {
     if (!supportedIds.has(hop.contractId)) {
       return { valid: false, reason: `Asset ${hop.contractId} is no longer supported`, errorCode: "UNSUPPORTED_ASSET" };
     }
   }
   // Check slippage exceeded — reject quotes where applied slippage exceeds maximum threshold
-  if (typeof quote.slippageApplied === "number" && quote.slippageApplied > 0.15) {
-    return { valid: false, reason: `Slippage ${(quote.slippageApplied * 100).toFixed(2)}% exceeds maximum allowed threshold of 15%`, errorCode: "SLIPPAGE_EXCEEDED" };
+  if (typeof q.slippageApplied === "number" && q.slippageApplied > 0.15) {
+    return { valid: false, reason: `Slippage ${(q.slippageApplied * 100).toFixed(2)}% exceeds maximum allowed threshold of 15%`, errorCode: "SLIPPAGE_EXCEEDED" };
   }
   return { valid: true };
 }

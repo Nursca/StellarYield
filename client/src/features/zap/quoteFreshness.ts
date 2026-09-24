@@ -2,9 +2,58 @@ import type { ZapQuoteResponse } from "./types";
 
 export const ZAP_QUOTE_TTL_MS = 60_000;
 
+/** Deterministic user-facing message for an expired zap preview quote. */
+export const ZAP_QUOTE_EXPIRED_MESSAGE = "Quote expired. Refresh and try again.";
+
 export interface ZapQuoteFreshnessInput {
   expiresAt?: string;
   quotedAt: string;
+}
+
+/**
+ * Typed invalidation state for a zap preview quote.
+ *
+ * - `valid`   — the quote may still be used for display and submission.
+ * - `expired` — the quote must be treated as invalidated: submission is
+ *   blocked, the preview is flagged, and a fresh quote must be requested.
+ */
+export type ZapQuoteInvalidation =
+  | { status: "valid"; ageMs: number; remainingMs: number }
+  | { status: "expired"; ageMs: number; expiredForMs: number };
+
+/**
+ * Evaluate whether a zap preview quote has been invalidated by expiry.
+ *
+ * Rules (mirroring the server's `isQuoteExpired`):
+ *  - `expiresAt` present and parseable → expired when `nowMs > expiresAt`
+ *    (exclusive boundary: still valid at the exact expiry instant).
+ *  - `expiresAt` missing or unparseable → fall back to `quotedAt + TTL`.
+ *
+ * Pure and deterministic: callers inject `nowMs` so tests can probe the
+ * exact boundary without timers.
+ */
+export function evaluateZapQuoteInvalidation(
+  quote: ZapQuoteFreshnessInput,
+  nowMs: number = Date.now(),
+): ZapQuoteInvalidation {
+  const quotedMs = new Date(quote.quotedAt).getTime();
+  const ageMs = Number.isFinite(quotedMs) ? nowMs - quotedMs : Number.POSITIVE_INFINITY;
+
+  let expiresMs: number | null = null;
+  if (quote.expiresAt && typeof quote.expiresAt === "string") {
+    const parsed = new Date(quote.expiresAt).getTime();
+    if (Number.isFinite(parsed)) {
+      expiresMs = parsed;
+    }
+  }
+  if (expiresMs === null) {
+    expiresMs = Number.isFinite(quotedMs) ? quotedMs + ZAP_QUOTE_TTL_MS : Number.NEGATIVE_INFINITY;
+  }
+
+  if (nowMs > expiresMs) {
+    return { status: "expired", ageMs, expiredForMs: nowMs - expiresMs };
+  }
+  return { status: "valid", ageMs, remainingMs: expiresMs - nowMs };
 }
 
 /** Returns true when a zap quote should be treated as stale. */
@@ -12,14 +61,7 @@ export function isZapQuoteExpired(
   quote: ZapQuoteFreshnessInput,
   nowMs: number = Date.now(),
 ): boolean {
-  if (quote.expiresAt) {
-    const expiresMs = new Date(quote.expiresAt).getTime();
-    if (Number.isFinite(expiresMs)) {
-      return nowMs > expiresMs;
-    }
-  }
-  const quotedMs = new Date(quote.quotedAt).getTime();
-  return nowMs - quotedMs > ZAP_QUOTE_TTL_MS;
+  return evaluateZapQuoteInvalidation(quote, nowMs).status === "expired";
 }
 
 export interface ZapQuoteRequestParams {

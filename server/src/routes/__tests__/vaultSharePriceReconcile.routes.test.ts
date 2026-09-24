@@ -21,7 +21,7 @@ import {
 } from "../../../../shared/types/vaultSharePrice";
 
 function makeEvent(
-  overrides: Partial<VaultSharePriceEvent> & { eventType: VaultSharePriceEvent["eventType"] },
+  overrides: Partial<VaultSharePriceEvent> = {},
 ): VaultSharePriceEvent {
   return {
     vaultId: "vault-1",
@@ -233,6 +233,61 @@ describe("Vault share-price reconcile routes", () => {
       expect(res.body.status).toBe("success");
       expect(res.body.contractState.eventCount).toBe(2);
     });
+    it("returns 400 INVALID_EVENT when an event belongs to a different vault", async () => {
+      const res = await request(app)
+        .post("/api/vaults/vault-1/share-price/reconcile")
+        .set(STANDARD_HEADERS)
+        .send({
+          events: [makeEvent({ vaultId: "vault-2", amount: "1000", shares: "1000" })],
+          cachedSnapshot: cached(),
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("INVALID_EVENT");
+    });
+
+    it("returns 400 INVALID_EVENT for a negative amount", async () => {
+      const res = await request(app)
+        .post("/api/vaults/vault-1/share-price/reconcile")
+        .set(STANDARD_HEADERS)
+        .send({
+          events: [makeEvent({ amount: "-1000", shares: "1000" })],
+          cachedSnapshot: cached(),
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("INVALID_EVENT");
+    });
+
+    it("returns 400 when cachedSnapshot omits totalAssets instead of defaulting it to 0", async () => {
+      const { totalAssets: _omitted, ...partial } = cached();
+      const res = await request(app)
+        .post("/api/vaults/vault-1/share-price/reconcile")
+        .set(STANDARD_HEADERS)
+        .send({
+          events: [makeEvent({ amount: "1000000", shares: "1000000" })],
+          cachedSnapshot: partial,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("MALFORMED_INPUT");
+    });
+
+    it("accepts flash_loan / emergency_withdraw / rescue and serializes bigint totals", async () => {
+      const res = await request(app)
+        .post("/api/vaults/vault-1/share-price/reconcile")
+        .set(STANDARD_HEADERS)
+        .send({
+          events: [
+            makeEvent({ eventType: "deposit", amount: "1000000", shares: "1000000", ledger: 1, txHash: "a" }),
+            makeEvent({ eventType: "flash_loan", amount: "10000", ledger: 2, txHash: "b" }),
+            makeEvent({ eventType: "emergency_withdraw", amount: "100000", shares: "100000", ledger: 3, txHash: "c" }),
+            makeEvent({ eventType: "rescue", amount: "10000", ledger: 4, txHash: "d" }),
+          ],
+          cachedSnapshot: cached({ totalAssets: 900_000, totalShares: 900_000, sharePrice: 1 }),
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("success");
+      expect(res.body.contractState.totalAssets).toBe("900000");
+      expect(res.body.contractState.totalShares).toBe("900000");
+    });
   });
 
   // GET .../history ────────────────────────────────────────────────────────────
@@ -281,6 +336,32 @@ describe("Vault share-price reconcile routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.limit).toBe(100); // clamped to max 100
       expect(res.body.data.every((e: { status: string }) => e.status === "success")).toBe(true);
+    });
+
+    it("returns runs newest first", async () => {
+      const seeded = new VaultSharePriceReconciliationService({
+        cacheLoader: { loadSharePrice: () => Promise.resolve(cached()) },
+      });
+      jest.useFakeTimers({ now: new Date("2026-09-01T00:00:00Z") });
+      try {
+        await seeded.reconcileVault("vault-1", [makeEvent({ amount: "1000000", shares: "1000000" })]);
+        jest.setSystemTime(new Date("2026-09-02T00:00:00Z"));
+        await seeded.reconcileVault("vault-1", [makeEvent({ amount: "5000000", shares: "1000000" })]);
+      } finally {
+        jest.useRealTimers();
+      }
+      const res = await request(buildApp(seeded)).get(
+        "/api/vaults/vault-1/share-price/reconcile/history",
+      );
+      expect(res.body.data.map((e: { status: string }) => e.status)).toEqual(["partial", "success"]);
+    });
+
+    it("returns 400 for an unknown status filter", async () => {
+      const res = await request(app)
+        .get("/api/vaults/vault-1/share-price/reconcile/history")
+        .query({ status: "bogus" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("MALFORMED_INPUT");
     });
 
     it("clamps limit to 1 minimum", async () => {
