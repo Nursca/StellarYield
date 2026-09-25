@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { idempotency } from "../middleware/idempotency";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -65,8 +66,10 @@ router.post("/quote", (req: Request, res: Response) => {
   }
 });
 
-// POST /api/onramp/intent - Confirm intent and create pending transaction
-router.post("/intent", async (req: Request, res: Response) => {
+// POST /api/onramp/intent - Confirm intent and create pending transaction.
+// An `Idempotency-Key` header makes retries return the original transaction
+// instead of creating a duplicate PENDING deposit (see middleware/idempotency.ts).
+router.post("/intent", idempotency({ scope: "onramp.intent" }), async (req: Request, res: Response) => {
   try {
     getProviderConfig();
     const { quoteId, walletAddress } = req.body;

@@ -71,6 +71,8 @@ tags:
     description: Protocol incident tracking and resolution
   - name: Onramp
     description: Fiat onramp provider webhook integration
+  - name: Offramp
+    description: Fiat offramp withdrawals proxied to the provider
   - name: Deposits
     description: Multi-asset deposit routing recommendations
   - name: Drift
@@ -3056,6 +3058,98 @@ paths:
 
   # ── Onramp ───────────────────────────────────────────────────────────────
 
+  /api/onramp/intent:
+    post:
+      summary: Confirm an onramp quote and create a pending deposit
+      description: >
+        Creates a PENDING onramp transaction for a quote. Send an
+        `Idempotency-Key` so a retried request returns the original
+        transaction instead of creating a duplicate.
+      tags:
+        - Onramp
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quoteId, walletAddress]
+              properties:
+                quoteId:
+                  type: string
+                walletAddress:
+                  type: string
+      responses:
+        '200':
+          description: Pending transaction created (or replayed)
+          headers:
+            Idempotent-Replayed:
+              description: "`true` when this is a stored response replayed for a repeated key."
+              schema:
+                type: string
+                enum: ["true"]
+        '400':
+          description: >
+            `INVALID_IDEMPOTENCY_KEY` (malformed header) or, when
+            `IDEMPOTENCY_REQUIRED=true`, `IDEMPOTENCY_KEY_REQUIRED`.
+        '409':
+          description: >
+            `IDEMPOTENCY_REQUEST_IN_PROGRESS` — a request with this key is still
+            running. `recoverable: true`; retry after `Retry-After` seconds.
+        '422':
+          description: "`IDEMPOTENCY_KEY_REUSED` — the key was already used with a different body."
+        '503':
+          description: >
+            `IDEMPOTENCY_STORE_UNAVAILABLE` — the key could not be checked, so the
+            request was not run. `recoverable: true`; retry with the same key.
+
+  /api/offramp/withdrawals:
+    post:
+      summary: Create an offramp withdrawal (proxied to the provider)
+      description: >
+        Proxies withdrawal creation to the offramp provider and returns its
+        status and body. Send an `Idempotency-Key` so a retried request cannot
+        create a second withdrawal. Provider 5xx and proxy failures are not
+        stored, so the same key can be retried.
+      tags:
+        - Offramp
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Passed through to the provider unchanged.
+      responses:
+        '201':
+          description: Withdrawal created by the provider (or replayed)
+          headers:
+            Idempotent-Replayed:
+              description: "`true` when this is a stored response replayed for a repeated key."
+              schema:
+                type: string
+                enum: ["true"]
+        '502':
+          description: "`OFFRAMP_PROXY_ERROR` — provider unreachable. Not stored; retry with the same key."
+        '400':
+          description: >
+            `INVALID_IDEMPOTENCY_KEY` (malformed header) or, when
+            `IDEMPOTENCY_REQUIRED=true`, `IDEMPOTENCY_KEY_REQUIRED`.
+        '409':
+          description: >
+            `IDEMPOTENCY_REQUEST_IN_PROGRESS` — a request with this key is still
+            running. `recoverable: true`; retry after `Retry-After` seconds.
+        '422':
+          description: "`IDEMPOTENCY_KEY_REUSED` — the key was already used with a different body."
+        '503':
+          description: >
+            `OFFRAMP_UNAVAILABLE` (not configured) or `IDEMPOTENCY_STORE_UNAVAILABLE` — the key could not be checked, so the
+            request was not run. `recoverable: true`; retry with the same key.
+
   /api/onramp/webhook:
     post:
       summary: Onramp provider webhook
@@ -3189,6 +3283,19 @@ paths:
   # - Any admin-only endpoints that require interactive session tokens are documented above when needed; ephemeral or highly-sensitive debug routes are excluded.
 
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Client-generated key (UUID recommended; 1–255 of `A-Za-z0-9._:-`). A
+        repeat with the same key and body replays the stored response instead
+        of running the request again. Keys expire after `IDEMPOTENCY_TTL_MS`
+        (default 24h). Required only when `IDEMPOTENCY_REQUIRED=true`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
     ExposureHeatmapAxisEntry:
       type: object
