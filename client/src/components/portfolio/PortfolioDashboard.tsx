@@ -11,7 +11,9 @@ import {
 import { YieldFlowCanvas } from "../visualizations";
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
 import { ExposureMap } from "../../portfolio/ExposureMap";
+import ExposureHeatmap from "./ExposureHeatmap";
 import { DailyMovementPanel } from "../../portfolio/DailyMovementPanel";
+import { useDailyMovement } from "../../hooks/useDailyMovement";
 import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
@@ -180,6 +182,15 @@ export default function PortfolioDashboard({
     () => analyzeConcentration(exposure),
     [exposure],
   );
+  const heatmapPositions = useMemo(
+    () =>
+      positions.map((p) => ({
+        asset: p.asset,
+        protocol: p.protocol,
+        valueUsd: p.currentValue,
+      })),
+    [positions],
+  );
 
   if (isLoading) {
     return (
@@ -338,6 +349,8 @@ export default function PortfolioDashboard({
           totalValue: exposure.totalValueUsd,
         }}
       />
+
+      <ExposureHeatmap positions={heatmapPositions} />
 
       <RiskScoreBreakdownPanel />
 

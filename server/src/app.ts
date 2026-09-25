@@ -67,6 +67,7 @@ import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
 import driftRouter from "./routes/drift";
 import portfolioMovementRouter from "./routes/portfolioMovement";
+import portfolioExposureRouter from "./routes/portfolioExposure";
 import digestScheduleRouter from "./routes/digestScheduleSettings";
 import integrationsRouter from "./routes/integrations";
 import stablecoinBasketRouter from "./routes/stablecoinBasket";
@@ -169,6 +170,7 @@ export function createApp() {
   app.use("/api/governance", governanceVoteReceiptsRouter);
   app.use("/api/portfolio/activity", activityTimelineRouter);
   app.use("/api/portfolio/reconcile", portfolioReconcileRouter);
+  app.use("/api/portfolio/exposure", portfolioExposureRouter);
   app.use("/api/presets", presetsRouter);
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/offramp", offrampRouter);

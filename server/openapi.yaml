@@ -2648,6 +2648,124 @@ paths:
 
   # ── Incidents ─────────────────────────────────────────────────────────────
 
+  /api/portfolio/exposure/heatmap:
+    post:
+      summary: Build an asset × protocol exposure heatmap
+      description: >
+        Cross-tabulates positions into a matrix of portfolio share per
+        (asset, protocol) pair. Row and column totals equal the per-asset and
+        per-protocol exposure buckets. Cells are graded against the stricter of
+        the configured asset and protocol concentration thresholds
+        (`CONCENTRATION_*_SHARE`). Beyond `maxAssets` / `maxProtocols`, the
+        smallest entries collapse into an "Other" bucket (key `__other__`).
+        Zero-value positions are skipped; an empty portfolio returns empty arrays.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [positions]
+              properties:
+                positions:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [asset, protocol]
+                    properties:
+                      asset:
+                        type: string
+                      protocol:
+                        type: string
+                      valueUsd:
+                        type: number
+                        minimum: 0
+                      currentValueUsd:
+                        type: number
+                        minimum: 0
+                        description: Accepted in place of `valueUsd`.
+                maxAssets:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  default: 8
+                maxProtocols:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  default: 8
+      responses:
+        '200':
+          description: Heatmap matrix
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExposureHeatmapAxisEntry'
+                  protocols:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExposureHeatmapAxisEntry'
+                  cells:
+                    type: array
+                    description: "`cells[row][col]` aligned with `assets[row]` × `protocols[col]`."
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          valueUsd:
+                            type: number
+                          share:
+                            type: number
+                          severity:
+                            type: string
+                            enum: [ok, warning, critical]
+                  totalValueUsd:
+                    type: number
+                  maxCellShare:
+                    type: number
+                  severity:
+                    type: string
+                    enum: [ok, warning, critical]
+                  cellThreshold:
+                    type: object
+                    properties:
+                      warn:
+                        type: number
+                      critical:
+                        type: number
+                  positionCount:
+                    type: integer
+                  skippedCount:
+                    type: integer
+        '400':
+          description: >
+            `MALFORMED_INPUT` (positions not an array), `INVALID_POSITION`
+            (`details.index` names the offending position), `TOO_MANY_POSITIONS`,
+            or `INVALID_OPTIONS`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [MALFORMED_INPUT, INVALID_POSITION, TOO_MANY_POSITIONS, INVALID_OPTIONS]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    properties:
+                      index:
+                        type: integer
   /api/portfolio/reconcile:
     post:
       summary: Reconcile a portfolio and explain any failures
@@ -3072,6 +3190,27 @@ paths:
 
 components:
   schemas:
+    ExposureHeatmapAxisEntry:
+      type: object
+      properties:
+        key:
+          type: string
+          description: The label, or `__other__` for the collapsed bucket.
+        label:
+          type: string
+        valueUsd:
+          type: number
+        share:
+          type: number
+        severity:
+          type: string
+          enum: [ok, warning, critical]
+        members:
+          type: array
+          items:
+            type: string
+          description: Labels folded into this entry (several only for "Other").
+
     PortfolioPosition:
       type: object
       required: [assetId, amount]
@@ -3944,7 +4083,7 @@ components:
         riskScore: 8.2
         rotationCostPct: 0.15
 
-     TreasurySimulationResult:
+    TreasurySimulationResult:
       type: object
       properties:
         scenarioId:
@@ -4007,7 +4146,7 @@ components:
             rotationCostPct: 0.25
         simulatedAt: "2026-06-26T12:00:00Z"
 
-     TreasuryScenario:
+    TreasuryScenario:
       type: object
       properties:
         id:
@@ -4045,7 +4184,7 @@ components:
             rotationCostPct: 0.25
         createdAt: "2026-06-26T11:45:00Z"
 
-     Alert:
+    Alert:
       type: object
       properties:
         id:
@@ -4072,7 +4211,7 @@ components:
           type: string
           format: date-time
 
-     FragmentationMetrics:
+    FragmentationMetrics:
       type: object
       properties:
         fragmentationScore:
@@ -4138,7 +4277,7 @@ components:
           type: string
           format: date-time
 
-     AuditAlert:
+    AuditAlert:
       type: object
       properties:
         id:
@@ -4165,7 +4304,7 @@ components:
           actionCount: 12
         createdAt: "2026-06-26T12:05:00Z"
 
-     MonitoringStatus:
+    MonitoringStatus:
       type: object
       properties:
         running:
@@ -4193,7 +4332,7 @@ components:
           - "slack-webhook-alerts"
           - "admin-email-alerts"
 
-     MonitoringReport:
+    MonitoringReport:
       type: object
       properties:
         generatedAt:
