@@ -45,6 +45,22 @@ jobs:
               return unique(targets).map((login) => `@${login}`).join(" ");
             }
 
+            function extractClosingIssueNumbers(pr) {
+              const text = [pr.title || "", pr.body || ""].join("\n");
+              const numbers = new Set();
+              const closingLine = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[^\n]*/gi;
+              const issueRef = /(?:#|\/issues\/)(\d+)/g;
+              const lines = text.match(closingLine) || [];
+
+              for (const line of lines) {
+                for (const match of line.matchAll(issueRef)) {
+                  numbers.add(Number(match[1]));
+                }
+              }
+
+              return [...numbers].filter(Number.isInteger);
+            }
+
             async function commentOnce(issue_number, marker, body) {
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner,
@@ -57,24 +73,52 @@ jobs:
                 return;
               }
 
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number,
-                body
-              });
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+            async function closeLinkedIssues(pr) {
+              const issueNumbers = extractClosingIssueNumbers(pr);
+
+              for (const issue_number of issueNumbers) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number });
+
+                  if (issue.pull_request) {
+                    core.info(`Skipping #${issue_number}; it is a pull request record.`);
+                    continue;
+                  }
+
+                  if (issue.state !== "open") {
+                    core.info(`Issue #${issue_number} is already ${issue.state}.`);
+                    continue;
+                  }
+
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number,
+                    state: "closed",
+                    state_reason: "completed"
+                  });
+
+                  await commentOnce(
+                    issue_number,
+                    `<!-- stellar-auto-merge:closed-by-pr:${pr.number} -->`,
+                    `Closed after merged PR #${pr.number} referenced this issue with a closing keyword.`
+                  );
+
+                  core.info(`Closed linked issue #${issue_number} after merging PR #${pr.number}.`);
+                } catch (error) {
+                  core.warning(`Could not close linked issue #${issue_number} for PR #${pr.number}: ${error.message}`);
+                }
+              }
             }
 
             async function getPullWithMergeability(pull_number) {
               let pull;
 
               for (let attempt = 0; attempt < 6; attempt += 1) {
-                const response = await github.rest.pulls.get({
-                  owner,
-                  repo,
-                  pull_number
-                });
-
+                const response = await github.rest.pulls.get({ owner, repo, pull_number });
                 pull = response.data;
 
                 if (pull.mergeable !== null) {
@@ -131,6 +175,7 @@ jobs:
                   });
 
                   core.info(`Merged PR #${pr.number} using ${merge_method}.`);
+                  await closeLinkedIssues(pr);
                   return true;
                 } catch (error) {
                   lastError = error;

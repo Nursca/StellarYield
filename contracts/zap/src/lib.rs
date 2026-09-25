@@ -202,7 +202,11 @@ impl Zap {
         }
 
         let zap_addr = env.current_contract_address();
-        let dex_router: Address = env.storage().instance().get(&DataKey::DexRouter).unwrap();
+        let dex_router: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DexRouter)
+            .ok_or(ZapError::NotInitialized)?;
 
         // Step 1: Transfer input tokens from user to this contract
         let input_client = token::Client::new(&env, &input_token);
@@ -303,7 +307,11 @@ impl Zap {
         Self::require_init(&env)?;
         admin.require_auth();
 
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ZapError::NotInitialized)?;
         if admin != stored_admin {
             return Err(ZapError::Unauthorized);
         }
@@ -366,19 +374,15 @@ mod tests {
             env.storage()
                 .instance()
                 .set(&RouterKey::ZapCaller, &zap_caller);
-            env.storage().instance().set(&RouterKey::Output, &amount_out);
+            env.storage()
+                .instance()
+                .set(&RouterKey::Output, &amount_out);
             env.storage()
                 .instance()
                 .set(&RouterKey::InputUsed, &input_used);
         }
 
-        pub fn swap(
-            env: Env,
-            from: Address,
-            to: Address,
-            amount_in: i128,
-            min_out: i128,
-        ) -> i128 {
+        pub fn swap(env: Env, from: Address, to: Address, amount_in: i128, min_out: i128) -> i128 {
             let router = env.current_contract_address();
             let zap: Address = env
                 .storage()
@@ -560,6 +564,39 @@ mod tests {
         assert_eq!(result, Err(Ok(ZapError::Unauthorized)));
     }
 
+    #[test]
+    fn test_set_dex_router_missing_admin_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::Admin);
+        });
+
+        let new_router = Address::generate(&t.env);
+        let result = t.zap.try_set_dex_router(&t.user, &new_router);
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_zap_deposit_missing_router_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::DexRouter);
+        });
+
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &false,
+        );
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
     // ── Event assertion tests (#1045) ──────────────────────────────────
 
     #[test]
@@ -589,19 +626,17 @@ mod tests {
         let t = setup_zap_env();
         StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.vault_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &0,
-                &1,
-                &0,
-                &false,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+        );
 
         assert_eq!(shares, 1_000);
         assert_eq!(
@@ -629,22 +664,19 @@ mod tests {
     #[test]
     fn test_zap_deposit_swap_full_emits_zap_dep() {
         let t = setup_zap_env();
-        t.router
-            .configure(&t.zap_id, &900, &1_000);
+        t.router.configure(&t.zap_id, &900, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+        );
 
         assert_eq!(shares, 900);
         assert_eq!(
@@ -662,19 +694,17 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+        );
 
         assert_eq!(shares, 600);
         assert_eq!(
@@ -690,10 +720,9 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_part")
             })
-            .map(|(_, _, data)| data.clone())
+            .map(|(_, _, data)| data)
             .unwrap();
-        let decoded: (Address, Address, Address, i128, i128, i128) =
-            part_data.into_val(&t.env);
+        let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
         assert_eq!(decoded.1, t.input_token);
         assert_eq!(decoded.2, t.vault_token);
@@ -708,18 +737,17 @@ mod tests {
         // Router consumes only 600 of 1000 input; 400 should be refunded.
         t.router.configure(&t.zap_id, &900, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+        );
 
         assert_eq!(
             count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_ref")),
@@ -734,7 +762,7 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_ref")
             })
-            .map(|(_, _, data)| data.clone())
+            .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, i128, Symbol) = ref_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
@@ -752,18 +780,17 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+        );
 
         let topics = zap_event_topics(&t.env, &t.zap_id);
         assert_eq!(topics.len(), 3);

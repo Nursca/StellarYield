@@ -5,6 +5,12 @@ import { getYieldData } from "./yieldService";
 import { freezeService } from "./freezeService";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
+import { getFeeOracleEstimate } from "./feeOracleService";
+import {
+  evaluateZapReserveSafety,
+  fetchWalletReserveSnapshot,
+  type ZapReserveCheckResult,
+} from "./stellarReserveService";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -14,6 +20,14 @@ export interface ZapQuoteBody {
   vaultDecimals: number;
   slippageTolerance?: number;
   protocol?: string;
+  /**
+   * Depositing wallet address (#1148). Optional — when supplied, the quote
+   * includes a minimum-balance reserve check (`reserveCheck`) so the client
+   * can block signing before the wallet would be left below its required
+   * Stellar reserve. Omitted entirely when absent, preserving the existing
+   * quote response shape for callers that don't pass it.
+   */
+  walletAddress?: string;
 }
 
 /**
@@ -60,6 +74,8 @@ export function isQuoteExpired(
   }
   return nowMs > expiresMs;
 }
+/** Stroops per XLM (7 decimal places), matching the native asset's fixed precision. */
+const STROOPS_PER_XLM = 10_000_000;
 
 export interface ZapQuoteResult {
   path: { contractId: string; label?: string }[];
@@ -75,6 +91,113 @@ export interface ZapQuoteResult {
   expiresAt: string;
   routeHash: string;
   assetConfigVersion: string;
+  /**
+   * Minimum-balance reserve check result (#1148), present only when the
+   * request included `walletAddress`. `safe: false` means executing this
+   * zap would leave the wallet below its required Stellar reserve — the
+   * client should block signing and surface `message`/`blockReason`.
+   */
+  reserveCheck?: ZapReserveCheckResult;
+}
+
+/**
+ * Severity of a fee drift warning.
+ * - "warn":  delta is material (≥ FEE_DRIFT_WARN_THRESHOLD) — user should be
+ *            informed but the transaction is not automatically blocked.
+ * - "error": delta exceeds the hard limit (≥ FEE_DRIFT_ERROR_THRESHOLD) —
+ *            the UI should block signing until the user re-quotes.
+ */
+export type FeeDriftSeverity = "warn" | "error";
+
+/**
+ * Emitted when the fee baked into an execution estimate diverges from the
+ * preview fee by more than the configured tolerance.
+ */
+export interface FeeDriftWarning {
+  /** Discriminant so callers can narrow on type. */
+  type: "FEE_DRIFT";
+  severity: FeeDriftSeverity;
+  /** Fee amount captured at quote time (in the quote's native unit). */
+  previewFee: string;
+  /** Fee amount observed at execution time. */
+  executionFee: string;
+  /** Absolute delta between preview and execution fee. */
+  deltaAbs: string;
+  /** Relative delta as a fraction between 0 and 1 (e.g. 0.12 = 12%). */
+  deltaRelative: number;
+  /** Human-readable description for UI display. */
+  message: string;
+}
+
+/**
+ * Fractional delta at which a fee discrepancy becomes a *warn*-level drift.
+ * Default: 5% (0.05). Override via FEE_DRIFT_WARN_THRESHOLD env var.
+ */
+export function getFeeDriftWarnThreshold(): number {
+  const raw = process.env.FEE_DRIFT_WARN_THRESHOLD;
+  const parsed = raw !== undefined ? parseFloat(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.05;
+}
+
+/**
+ * Fractional delta at which a fee discrepancy becomes an *error*-level drift.
+ * Default: 15% (0.15). Override via FEE_DRIFT_ERROR_THRESHOLD env var.
+ */
+export function getFeeDriftErrorThreshold(): number {
+  const raw = process.env.FEE_DRIFT_ERROR_THRESHOLD;
+  const parsed = raw !== undefined ? parseFloat(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.15;
+}
+
+/**
+ * Compare a fee captured at quote preview time against the fee observed at
+ * execution time and emit a typed `FeeDriftWarning` when the divergence
+ * exceeds the configured tolerance.
+ *
+ * Both fees are expressed as string-encoded integer stroops (or any consistent
+ * unit — the function only cares about the ratio, not the unit).
+ *
+ * Returns `null` when the divergence is below the warn threshold (i.e. the
+ * difference is just normal rounding noise).
+ */
+export function detectFeeDrift(
+  previewFee: string,
+  executionFee: string,
+): FeeDriftWarning | null {
+  const preview = BigInt(previewFee);
+  const execution = BigInt(executionFee);
+
+  if (preview === 0n) {
+    // Cannot compute a meaningful relative delta when the preview fee is zero.
+    return null;
+  }
+
+  const delta = execution > preview ? execution - preview : preview - execution;
+  // Use number arithmetic for the ratio — stroops fit safely in a float64.
+  const deltaRelative = Number(delta) / Number(preview);
+
+  const warnThreshold = getFeeDriftWarnThreshold();
+  const errorThreshold = getFeeDriftErrorThreshold();
+
+  if (deltaRelative < warnThreshold) {
+    return null;
+  }
+
+  const severity: FeeDriftSeverity = deltaRelative >= errorThreshold ? "error" : "warn";
+  const pct = (deltaRelative * 100).toFixed(2);
+
+  return {
+    type: "FEE_DRIFT",
+    severity,
+    previewFee,
+    executionFee,
+    deltaAbs: delta.toString(),
+    deltaRelative,
+    message:
+      severity === "error"
+        ? `Fee has changed by ${pct}% since the quote was generated. Please re-quote before signing.`
+        : `Fee estimate has drifted by ${pct}% from the quoted value. Review before signing.`,
+  };
 }
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
@@ -263,6 +386,8 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   const issuedAt = quotedAt;
   const expiresAt = new Date(quotedAtMs + ZAP_QUOTE_EXPIRY_MS).toISOString();
 
+  const reserveCheck = await computeReserveCheck(body);
+
   return {
     ...sim,
     slippageApplied: effectiveSlippage,
@@ -275,6 +400,7 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     expiresAt,
     routeHash,
     assetConfigVersion,
+    ...(reserveCheck ? { reserveCheck } : {}),
   };
 }
 
@@ -307,6 +433,53 @@ export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErr
     "ROUTE_MISMATCH",
     "UNSUPPORTED_ASSET",
   ]);
+
+/**
+ * Runs the minimum-balance reserve check (#1148) for a zap quote when a
+ * wallet address was supplied. Returns `undefined` (rather than throwing or
+ * blocking the whole quote) when the wallet snapshot or fee estimate can't
+ * be fetched — the client simply won't receive a reserve verdict, matching
+ * the existing degrade-gracefully convention used elsewhere in this file
+ * (e.g. router simulation falling back to `quoteFallback`).
+ */
+async function computeReserveCheck(
+  body: ZapQuoteBody,
+): Promise<ZapReserveCheckResult | undefined> {
+  if (!body.walletAddress) return undefined;
+
+  const snapshot = await fetchWalletReserveSnapshot(
+    body.walletAddress,
+    body.vaultTokenContract,
+  );
+  if (!snapshot) return undefined;
+
+  let estimatedNetworkFeeXlm: number;
+  try {
+    const feeEstimate = await getFeeOracleEstimate();
+    estimatedNetworkFeeXlm = feeEstimate.bufferedFees.average / STROOPS_PER_XLM;
+  } catch {
+    return undefined;
+  }
+
+  // XLM only leaves the account's native balance when XLM itself is the
+  // asset being deposited; depositing another SAC asset doesn't touch the
+  // native balance beyond the network fee already accounted for above.
+  const xlmAsset = getZapSupportedAssetsPayload().assets.find(
+    (a) => a.symbol.toUpperCase() === "XLM",
+  );
+  const isNativeInput = Boolean(xlmAsset) && body.inputTokenContract === xlmAsset!.contractId;
+  const xlmLeavingAccount = isNativeInput
+    ? Number(BigInt(body.amountInStroops)) / STROOPS_PER_XLM
+    : 0;
+
+  return evaluateZapReserveSafety({
+    xlmBalance: snapshot.xlmBalance,
+    subentryCount: snapshot.subentryCount,
+    needsNewVaultTrustline: snapshot.needsNewVaultTrustline,
+    estimatedNetworkFeeXlm,
+    xlmLeavingAccount,
+  });
+}
 
 export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   if (!quote || typeof quote !== "object") {

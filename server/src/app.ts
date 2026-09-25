@@ -4,6 +4,7 @@ import express, { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { createYoga } from "graphql-yoga";
 import { predictApy, HistoricalDataPoint } from "./analytics/apyPredictor";
+import { buildApyConfidenceExplanation } from "./services/apyConfidenceExplanationService";
 import { signFeeBump } from "./relayer/relayer";
 import { context } from "./graphql/context";
 import { graphqlSchema } from "./graphql/schema";
@@ -37,14 +38,18 @@ import prometheusMetricsRouter from "./routes/prometheusMetrics";
 import alertsRouter from "./routes/alerts";
 import openapiRouter from "./routes/openapi";
 import incidentsRouter from "./routes/incidents";
+import indexerRecoveryRouter from "./routes/indexerRecovery";
+import featureFlagsRouter from "./routes/featureFlags";
 import simulatorRouter from "./routes/simulator";
 import correlationRouter from "./routes/correlation";
 import strategiesRouter from "./routes/strategies";
 import treasuryRouter from "./routes/treasury";
+import contractsRouter from "./routes/contracts";
 import governanceRouter from "./routes/governance";
 import governanceVoteReceiptsRouter from "./routes/governanceVoteReceipts";
 import activityTimelineRouter from "./routes/activityTimeline";
 import portfolioReconcileRouter from "./routes/portfolioReconcile";
+import portfolioImportRouter from "./routes/portfolioImport";
 import presetsRouter from "./routes/presets";
 import analyticsRouter from "./routes/analytics";
 import offrampRouter from "./routes/offramp";
@@ -53,6 +58,7 @@ import rebalancesRouter from "./routes/rebalances";
 import sharePriceHistoryRouter from "./routes/sharePriceHistory";
 import vaultSharePriceReconcileRouter from "./routes/vaultSharePriceReconcile";
 import withdrawalPreviewRouter from "./routes/withdrawalPreview";
+import allocationRollbackPreviewRouter from "./routes/allocationRollbackPreview";
 import reliabilityRouter from "./routes/reliability";
 import relayerStatusRouter from "./routes/relayerStatus";
 import riskRouter from "./routes/risk";
@@ -65,14 +71,16 @@ import momentumRouter from "./routes/momentum";
 import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
+import migrationReadinessRouter from "./routes/migrationReadiness";
+import reconciliationRouter from "./routes/reconciliation";
 import driftRouter from "./routes/drift";
 import portfolioMovementRouter from "./routes/portfolioMovement";
 import portfolioExposureRouter from "./routes/portfolioExposure";
 import digestScheduleRouter from "./routes/digestScheduleSettings";
-import integrationsRouter from "./routes/integrations";
 import stablecoinBasketRouter from "./routes/stablecoinBasket";
 import deltaNeutralRouter from "./routes/deltaNeutral";
-import reconciliationRouter from "./routes/reconciliation";
+import integrationsRouter from "./routes/integrations";
+import preferencesRouter from "./routes/preferences";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
@@ -161,6 +169,8 @@ export function createApp() {
   app.use("/api/weekly-reports", weeklyReportsRouter);
   app.use("/api/alerts", alertsRouter);
   app.use("/api/incidents", incidentsRouter);
+  app.use("/api/indexer/recovery-queue", indexerRecoveryRouter);
+  app.use("/api/feature-flags", featureFlagsRouter);
   app.use("/api/simulator", simulatorRouter);
   app.use("/api/correlation", correlationRouter);
   app.use("/api/openapi", openapiRouter);
@@ -168,17 +178,21 @@ export function createApp() {
   app.use("/api/treasury", treasuryRouter);
   app.use("/api/governance", governanceRouter);
   app.use("/api/governance", governanceVoteReceiptsRouter);
+  app.use("/api/preferences", preferencesRouter);
   app.use("/api/portfolio/activity", activityTimelineRouter);
   app.use("/api/portfolio/reconcile", portfolioReconcileRouter);
   app.use("/api/portfolio/exposure", portfolioExposureRouter);
+  app.use("/api/portfolio/import", portfolioImportRouter);
   app.use("/api/presets", presetsRouter);
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/offramp", offrampRouter);
   app.use("/api/contacts", contactsRouter);
   app.use("/api/rebalances", rebalancesRouter);
+  app.use("/api/vaults/migration-readiness", migrationReadinessRouter);
   app.use("/api/vaults", sharePriceHistoryRouter);
   app.use("/api/vaults", vaultSharePriceReconcileRouter);
   app.use("/api/vaults", withdrawalPreviewRouter);
+  app.use("/api/vaults", allocationRollbackPreviewRouter);
   app.use("/api/reliability", reliabilityRouter);
   app.use("/api/relayer", relayerStatusRouter);
   app.use("/api/risk", riskRouter);
@@ -188,6 +202,7 @@ export function createApp() {
   app.use("/api/audit-archive", eventArchiveRoutes);
   app.use("/api/momentum", momentumRouter);
   app.use("/api/queue", queueRouter);
+  app.use("/api/contracts", contractsRouter);
   app.use("/api/vaults/activity", vaultActivityRouter);
   app.use("/api/watchlist", watchlistRouter);
   app.use("/api/reconciliation", reconciliationRouter);
@@ -350,7 +365,16 @@ export function createApp() {
     }
 
     const prediction = predictApy(protocol, historical);
-    res.json(prediction);
+    // Source-level confidence explanation (#1386): additive structured
+    // summary derived from the prediction's own quorum + confidence inputs.
+    const explanation = buildApyConfidenceExplanation({
+      protocol,
+      confidenceInputs: prediction.confidenceInputs,
+      quorumStatus: prediction.quorumStatus,
+      confidence: prediction.predictions[0]?.confidence ?? null,
+      forecastApy: prediction.predictions[0]?.predictedApy ?? null,
+    });
+    res.json({ ...prediction, explanation });
   });
 
   app.post("/api/auth/challenge", (req: Request, res: Response) => {

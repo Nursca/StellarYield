@@ -125,11 +125,11 @@ export async function fetchSwapQuote(
       body: JSON.stringify(req),
       signal: options?.signal,
     });
-  } catch (err) {
-    if (options?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+  } catch (e) {
+    if (options?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) {
       throw new QuoteRequestCancelledError();
     }
-    throw new ZapQuoteError(err instanceof Error ? err.message : "Network request failed", {
+    throw new ZapQuoteError(e instanceof Error ? e.message : "Network request failed", {
       code: "NETWORK_ERROR",
       status: 0,
       recoverable: true,
